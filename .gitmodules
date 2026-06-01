@@ -1,0 +1,12 @@
+[submodule "src/mapconversion"]
+	path = src/mapconversion
+	url = https://github.com/crcz25/Map-Conversion-3D-Voxel-Map-to-2D-Occupancy-Map.git
+	branch = ros2
+[submodule "src/octomap_mapping"]
+	path = src/octomap_mapping
+	url = https://github.com/crcz25/octomap_mapping.git
+	branch = ros2
+[submodule "src/semantic_perception/third_party/YOLOs-CPP"]
+	path = src/semantic_perception/third_party/YOLOs-CPP
+	url = https://github.com/Geekgineer/YOLOs-CPP.git
+	branch = main
