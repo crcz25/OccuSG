@@ -1,0 +1,8 @@
+include README.md
+include pyproject.toml
+include package.xml
+include resource/scene_graph_core
+recursive-include scene_graph_core *.py
+recursive-exclude tests *
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]

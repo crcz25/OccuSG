@@ -1,0 +1,97 @@
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/humble.Dockerfile
+      target: occusg
+      args:
+        USERNAME: devuser
+        USER_UID: 1000
+        USER_GID: 1000
+        USE_GPU: ${USE_GPU:-ON}
+    image: occusg:latest
+    restart: "no"
+
+    environment:
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      ROS_DOMAIN_ID: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      TURTLEBOT3_MODEL: waffle
+      PROJECT_WS: /workspace/occusg_ws
+      USE_GPU: ${USE_GPU:-ON}
+
+    volumes:
+      - ../src:/workspace/occusg_ws/src:cached
+      - ../bags:/workspace/occusg_ws/bags:cached
+      - ../models:/workspace/occusg_ws/models:cached
+      - ${HOME}/.Xauthority:/home/devuser/.Xauthority:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/dri:/dev/dri
+      - /dev/snd:/dev/snd
+      - type: bind
+        source: ../overrides/turtlebot3_world.launch.py
+        target: /workspace/turtlebot3_ws/src/turtlebot3_simulations/turtlebot3_gazebo/launch/turtlebot3_world.launch.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../overrides/turtlebot3_world.launch.py
+        target: /workspace/turtlebot3_ws/install/turtlebot3_gazebo/share/turtlebot3_gazebo/launch/turtlebot3_world.launch.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../overrides/model.sdf
+        target: /workspace/turtlebot3_ws/src/turtlebot3_simulations/turtlebot3_gazebo/models/turtlebot3_waffle/model.sdf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../overrides/model.sdf
+        target: /workspace/turtlebot3_ws/install/turtlebot3_gazebo/share/turtlebot3_gazebo/models/turtlebot3_waffle/model.sdf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../overrides/turtlebot3_waffle.urdf
+        target: /workspace/turtlebot3_ws/src/turtlebot3/turtlebot3_description/urdf/turtlebot3_waffle.urdf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../overrides/turtlebot3_waffle.urdf
+        target: /workspace/turtlebot3_ws/install/turtlebot3_description/share/turtlebot3_description/urdf/turtlebot3_waffle.urdf
+        read_only: true
+        bind:
+          create_host_path: false
+
+    group_add:
+      - video
+
+    tty: true
+    stdin_open: true
+    command: sleep infinity
+
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    cap_add:
+      - SYS_PTRACE
+      - SYS_RAWIO
+
+    privileged: true
+
+    network_mode: host
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+    user: devuser

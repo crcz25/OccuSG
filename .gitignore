@@ -49,3 +49,11 @@ qtcreator-*
 
 # Catkin custom files
 CATKIN_IGNORE
+
+# Keep the bags directory as a placeholder, but ignore bag data inside it.
+/bags/*
+!/bags/.gitkeep
+
+# Keep the models directory as a placeholder, but ignore bag data inside it.
+/models/*
+!/models/.gitkeep

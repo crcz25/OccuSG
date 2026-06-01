@@ -1,0 +1,55 @@
+Metadata-Version: 2.4
+Name: scene-graph-core
+Version: 0.1.0
+Summary: Core library for 3D Scene Graph construction and manipulation in robotics
+Home-page: https://github.com/crcz25/3dsg
+Author: Carlos Cueto Zumaya
+Author-email: Carlos Cueto Zumaya <carlos.cueto@example.com>
+License: MIT
+Project-URL: Homepage, https://github.com/crcz25/3dsg
+Project-URL: Repository, https://github.com/crcz25/3dsg
+Project-URL: Documentation, https://github.com/crcz25/3dsg/blob/develop/README.md
+Project-URL: Bug Tracker, https://github.com/crcz25/3dsg/issues
+Keywords: robotics,scene-graph,3dsg,perception,slam
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: networkx>=2.8
+Requires-Dist: numpy<2,>=1.21
+Requires-Dist: scipy>=1.7
+Requires-Dist: shapely>=2.1.2
+Requires-Dist: rtree>=1.4.1
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=3.0; extra == "dev"
+Requires-Dist: black>=22.0; extra == "dev"
+Requires-Dist: flake8>=4.0; extra == "dev"
+Requires-Dist: mypy>=0.950; extra == "dev"
+Requires-Dist: isort>=5.10; extra == "dev"
+Provides-Extra: visualization
+Requires-Dist: matplotlib>=3.5; extra == "visualization"
+Dynamic: author
+Dynamic: home-page
+Dynamic: requires-python
+
+scene_graph_core/
+│
+├── scene_graph_core/
+│   ├── __init__.py
+│   ├── nodes.py         # SGNode class & NodeFactory
+│   ├── edges.py         # EdgeFactory and any relationship utilities
+│   ├── graph.py         # SceneGraph class: wrapper around networkx.MultiDiGraph
+│   ├── serializers.py   # functions for save/load (JSON, GEXF, etc.)
+│   └── utils.py         # any helpers (e.g. geometric tests, clustering hooks)
+│
+├── tests/               # unit tests for your core logic
+│   └── test_graph.py
+│
+└── setup.py             # setuptools config

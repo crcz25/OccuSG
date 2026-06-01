@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/scene_graph_core/__init__.py
+src/scene_graph_core/edge.py
+src/scene_graph_core/manager.py
+src/scene_graph_core/node.py
+src/scene_graph_core.egg-info/PKG-INFO
+src/scene_graph_core.egg-info/SOURCES.txt
+src/scene_graph_core.egg-info/dependency_links.txt
+src/scene_graph_core.egg-info/requires.txt
+src/scene_graph_core.egg-info/top_level.txt

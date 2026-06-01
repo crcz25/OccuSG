@@ -1,0 +1,190 @@
+# ==============================================================================
+# Minimal Scene Graph Pipeline Parameters (Matterport3D)
+# ==============================================================================
+# Shared parameter file for:
+#   ros2 launch scene_graph_ros scene_graph_pipeline_mp3d.launch.py
+# ==============================================================================
+
+semantic_node:
+  ros__parameters:
+    model_file: "/workspace/occusg_ws/models/yolo26x-seg.onnx"
+    class_file: "/workspace/occusg_ws/models/coco.names"
+    rgb_topic: "/mp3d/color/image_raw"
+    depth_topic: "/mp3d/depth/image_raw"
+    depth_info_topic: "/mp3d/depth/camera_info"
+    # The MP3D pipeline defaults the loader to camera_frame_policy:=ros_optical.
+    # That keeps depth-image projection, detections, point clouds, and TF in the
+    # same x-right/y-down/z-forward camera convention before transforming to map.
+    target_frame: "map"
+    tf_lookup_timeout_sec: 0.2
+    use_gpu: true
+    rgb_qos_history: "keep_last"
+    rgb_qos_reliability: "reliable"
+    rgb_qos_durability: "volatile"
+    rgb_qos_depth: -1
+    depth_qos_history: "keep_last"
+    depth_qos_reliability: "reliable"
+    depth_qos_durability: "volatile"
+    depth_qos_depth: -1
+    depth_info_qos_history: "keep_last"
+    depth_info_qos_reliability: "reliable"
+    depth_info_qos_durability: "volatile"
+    depth_info_qos_depth: -1
+    ann_img_qos_history: "keep_last"
+    ann_img_qos_reliability: "reliable"
+    ann_img_qos_durability: "volatile"
+    ann_img_qos_depth: -1
+    detections_qos_history: "keep_last"
+    detections_qos_reliability: "reliable"
+    detections_qos_durability: "volatile"
+    detections_qos_depth: -1
+    conf_thresh: 0.70
+    iou_thresh: 0.45
+    cluster_eps: 0.05
+    cluster_min_size: 50.0
+    cluster_max_size: 2500000
+    queue_size: 10
+    sync_max_interval_sec: 0.03
+
+point_cloud_generator_node:
+  ros__parameters:
+    depth_image_topic: "/mp3d/depth/image_raw"
+    camera_info_topic: "/mp3d/depth/camera_info"
+    output_frame: "mp3d_camera_frame"
+    pointcloud_topic: "/pointcloud"
+    stride: 2
+    min_depth: 0.01
+    max_depth: 10.0
+    target_hz: 2.0
+    sync_queue_size: 10
+    sync_slop_sec: 0.05
+    qos_depth: 10
+    input_qos_reliability: "reliable"
+    output_qos_reliability: "reliable"
+
+octomap_server:
+  ros__parameters:
+    frame_id: "map"
+    tf_cache_time_sec: 180.0
+    resolution: 0.05
+    # pointcloud_min_z: 0.02
+    # pointcloud_max_z: 1.5
+    # occupancy_min_z: 0.02
+    # occupancy_max_z: 1.0
+    sensor_model:
+      max_range: 8.0
+    latch: false
+    queue_size: 200
+    cloud_sub_qos_depth: 200
+
+map_conversion_node:
+  ros__parameters:
+    map_frame: "map"
+    minimum_z: 0.3
+    max_slope_ugv: 0.2
+    slope_estimation_size: 2
+    minimum_occupancy: 5
+    partial_map_updates: true
+    enable_debug_logging: false
+    debug_log_interval: 10
+    subscriber_qos_reliable: true
+    subscriber_qos_transient_local: false
+    publisher_qos_reliable: true
+    publisher_qos_transient_local: true
+
+scene_graph_region:
+  ros__parameters:
+    odom_topic: "/mp3d/odom"
+    3d_detections_topic: "/semantic_node/detections"
+    map_topic: "/mapUAV"
+    stable_regions_topic: "/dude/regions"
+    fixed_frame_id: "map"
+
+    odom_qos_history: "keep_last"
+    odom_qos_reliability: "reliable"
+    odom_qos_durability: "volatile"
+    odom_qos_depth: 10
+
+    detections_qos_history: "keep_last"
+    detections_qos_reliability: "reliable"
+    detections_qos_durability: "volatile"
+    detections_qos_depth: 10
+
+    map_qos_history: "keep_last"
+    map_qos_reliability: "reliable"
+    map_qos_durability: "volatile"
+    map_qos_depth: 10
+
+    stable_regions_qos_history: "keep_last"
+    stable_regions_qos_reliability: "reliable"
+    stable_regions_qos_durability: "volatile"
+    stable_regions_qos_depth: 20
+    ignore_empty_region_updates_after_valid: true
+    materialize_observed_regions: true
+
+    pipeline_hz: 1.0
+    maintenance_hz: 0.5
+    visualization_hz: 2.0
+    process_map_in_callback: false
+    detections_tf_lookup_timeout_sec: 0.2
+    maintenance_tick_warn_ms: 500.0
+
+    pose_distance_threshold: 0.5
+    pose_time_threshold: 10.0
+    pose_window_size: 3
+
+    obj_spatial_merge_threshold: 0.75
+
+    room_z_offset: 12.0
+    region_z_offset: 8.0
+    nav_region_boundary_epsilon_m: 0.5
+    nav_region_enable_neighbor_tiebreak: false
+
+    fs_cell_stride_cells: 15
+    fs_min_free_cell_count: 25
+    fs_z_offset: 4.0
+    fs_navigation_connectivity: 8
+    nearest_link_max_distance_m: 1.0
+
+    scene_graph_topic: "/dsg/scene_graph"
+    scene_graph_qos_history: "keep_last"
+    scene_graph_qos_reliability: "reliable"
+    scene_graph_qos_durability: "volatile"
+    scene_graph_qos_depth: 10
+
+    enable_debug_logging: true
+    debug_log_interval: 10
+    life_time: 0.0
+
+    # Visualization defaults keep the main scene readable while batching dense layers.
+    enable_pose_markers: true
+    enable_pose_labels: false
+    enable_object_markers: true
+    enable_object_labels: true
+    enable_room_markers: true
+    enable_room_labels: true
+    enable_region_markers: true
+    enable_region_labels: true
+    enable_navigation_markers: true
+    enable_navigation_labels: false
+    enable_pose_edges: true
+    enable_observation_edges: true
+    enable_navigation_edges: true
+    enable_region_contains_edges: true
+    enable_room_region_edges: true
+    enable_room_adjacency_edges: true
+    enable_nearest_freespace_edges: true
+
+    export_json_path: "/workspace/occusg_ws/scene_graph.json"
+    export_json_on_shutdown: true
+    export_json_compact: false
+
+    pose_marker_stride: 1
+    pose_label_stride: 1
+    pose_edge_stride: 1
+    navigation_marker_stride: 1
+    navigation_label_stride: 1
+    navigation_edge_stride: 1
+
+    visualization_warn_ms: 250.0
+    visualization_stats_interval: 20

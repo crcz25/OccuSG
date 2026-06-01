@@ -1,0 +1,18 @@
+/**:
+  ros__parameters:
+    decomp_threshold: 1.5
+    occupancy_grid_topic: /mapUAV
+    region_tracker_enable: true
+    region_tracker_min_iou: 0.20
+    region_tracker_max_centroid_distance: 1.5
+    region_tracker_min_area_ratio: 0.25
+    region_tracker_max_area_ratio: 4.0
+    region_tracker_max_missed_frames: 3
+    region_tracker_publish_debug: false
+    preserve_previous_on_invalid_update: true
+    publish_stale_regions_on_reject: true
+    min_valid_region_count: 1
+    max_unknown_ratio_for_update: 0.98
+    max_region_area_drop_ratio: 0.85
+    max_region_count_drop_ratio: 0.85
+    use_sim_time: true

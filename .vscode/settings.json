@@ -1,0 +1,79 @@
+{
+    "iis.configDir": "",
+    "ros.distro": "humble",
+    "ros.rosSetupScript": "${workspaceFolder}/install/setup.bash",
+    "python.analysis.extraPaths": [
+        "/opt/ros/humble/lib/python3.10/site-packages/",
+        "/opt/ros/foxy/lib/python3.8/site-packages/",
+        "/opt/ros/noetic/lib/python3/dist-packages/"
+    ],
+    "python.autoComplete.extraPaths": [
+        "/opt/ros/humble/lib/python3.10/site-packages/",
+        "/opt/ros/foxy/lib/python3.8/site-packages/",
+        "/opt/ros/noetic/lib/python3/dist-packages/"
+    ],
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/bower_components": true,
+        "**/*.code-search": true,
+        "**/build": true,
+        "**/install": true,
+        "**/log": true
+    },
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        // "editor.formatOnSave": true
+    },
+    "cSpell.words": [
+        "RTPS",
+        "athackst",
+        "autopep",
+        "cmake",
+        "cppcheck",
+        "cpplint",
+        "DCMAKE",
+        "deque",
+        "devcontainer",
+        "ints",
+        "noqa",
+        "pytest",
+        "rclcpp",
+        "rclpy",
+        "repos",
+        "rosdep",
+        "rosdistro",
+        "rosidl",
+        "RTPS",
+        "uncrustify",
+        "Wextra",
+        "Wpedantic",
+        "xmllint"
+    ],
+    "cSpell.allowCompoundWords": true,
+    "cSpell.ignorePaths": [
+        "**/package-lock.json",
+        "**/node_modules/**",
+        "**/vscode-extension/**",
+        "**/.git/objects/**",
+        ".vscode",
+        ".vscode-insiders",
+        ".devcontainer/devcontainer.json"
+    ],
+    "ament-task-provider.envSetup": "source /opt/ros/humble/setup.bash",
+    // - clangd settings
+    "uncrustify.configPath.linux": "/opt/ros/humble/lib/python3.10/site-packages/ament_uncrustify/configuration/ament_code_style.cfg",
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.path": "/usr/bin/clangd",
+    "clangd.checkUpdates": false,
+    "clangd.restartAfterCrash": true,
+    "clangd.detectExtensionConflicts": true,
+    "clangd.arguments": [
+        "-log=verbose",
+        "-pretty",
+        "--background-index",
+        "--clang-tidy"
+    ],
+    // cmake settings
+    "cmake.sourceDirectory": "${workspaceFolder}/src/*",
+    "ROS2.distro": "humble"
+}

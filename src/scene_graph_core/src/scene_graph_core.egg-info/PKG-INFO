@@ -1,0 +1,29 @@
+Metadata-Version: 2.4
+Name: scene_graph_core
+Version: 0.1.0
+Summary: Core library for 3D scene-graph generation (NetworkX-based)
+Author-email: Your Name <you@example.com>
+Project-URL: Homepage, https://github.com/yourusername/scene_graph_core
+Classifier: Programming Language :: Python :: 3.8
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: networkx>=2.6
+Requires-Dist: numpy<2
+Requires-Dist: scipy>=1.15
+
+scene_graph_core/
+│
+├── scene_graph_core/
+│   ├── __init__.py
+│   ├── nodes.py         # SGNode class & NodeFactory
+│   ├── edges.py         # EdgeFactory and any relationship utilities
+│   ├── graph.py         # SceneGraph class: wrapper around networkx.MultiDiGraph
+│   ├── serializers.py   # functions for save/load (JSON, GEXF, etc.)
+│   └── utils.py         # any helpers (e.g. geometric tests, clustering hooks)
+│
+├── tests/               # unit tests for your core logic
+│   └── test_graph.py
+│
+└── setup.py             # setuptools config

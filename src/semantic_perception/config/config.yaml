@@ -1,0 +1,43 @@
+semantic_node:
+  ros__parameters:
+    model_file: "/workspace/occusg_ws/src/semantic_perception/models/yolo11x-seg.onnx"
+    class_file: "/workspace/occusg_ws/src/semantic_perception/models/coco.names"
+    rgb_topic: "/tesse/left_cam/rgb/image_raw"
+    depth_topic: "/tesse/depth_cam/mono/image_raw"
+    depth_info_topic: "/tesse/depth_cam/camera_info"
+
+    conf_thresh: 0.70  # Filter boxes below this confidence
+    iou_thresh: 0.45  # NMS IoU threshold
+    cluster_eps: 0.02  # 2 cm, same as ε in C++
+    cluster_min_size: 100.0  # minimum valid cluster size (points)
+    cluster_max_size: 2500000
+
+    queue_size: 10
+    sync_max_interval_sec: 0.5
+    target_frame: "odom"
+    tf_lookup_timeout_sec: 0.1
+
+    rgb_qos_history: "keep_last"
+    rgb_qos_reliability: "best_effort"
+    rgb_qos_durability: "volatile"
+    rgb_qos_depth: -1
+
+    depth_qos_history: "keep_last"
+    depth_qos_reliability: "best_effort"
+    depth_qos_durability: "volatile"
+    depth_qos_depth: -1
+
+    depth_info_qos_history: "keep_last"
+    depth_info_qos_reliability: "reliable"
+    depth_info_qos_durability: "volatile"
+    depth_info_qos_depth: -1
+
+    ann_img_qos_history: "keep_last"
+    ann_img_qos_reliability: "reliable"
+    ann_img_qos_durability: "volatile"
+    ann_img_qos_depth: -1
+
+    detections_qos_history: "keep_last"
+    detections_qos_reliability: "reliable"
+    detections_qos_durability: "volatile"
+    detections_qos_depth: -1
