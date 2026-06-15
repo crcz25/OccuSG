@@ -9,10 +9,13 @@ OccuSG is the implementation of `Occupancy-Grounded Room Segmentation for Hierar
 
 ```bibtex
 @misc{occusg2026,
-  title = {OccuSG},
-  author = {...},
-  year = {2026},
-  note = {Citation information to be updated}
+      title={Occupancy-Grounded Room Segmentation for Hierarchical 3D Scene Graphs}, 
+      author={Carlos Cueto Zumaya and Iacopo Catalano and Jorge Peña-Queralta and Wallace Moreira Bessa},
+      year={2026},
+      eprint={2606.13727},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2606.13727}, 
 }
 ```
 
