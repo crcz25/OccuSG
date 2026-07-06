@@ -105,16 +105,6 @@ RUN case "${USE_GPU}" in \
     esac
 ENV PATH=/opt/onnxruntime-current/bin:$PATH
 
-# Install mprocs
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
-    ca-certificates \
-    build-essential \
-    pkg-config \
-    libssl-dev \
- && rm -rf /var/lib/apt/lists/*
-
 # Check if "ubuntu" user exists, delete it if it does, then create the desired user
 RUN if getent passwd ubuntu > /dev/null 2>&1; then \
     userdel -r ubuntu && \
@@ -133,19 +123,6 @@ RUN echo "source /opt/ros/$ROS_DISTRO/setup.bash" > /etc/profile.d/ros2.sh
 USER $USERNAME
 # WORKDIR $WORKSPACE_DIR
 RUN sudo rosdep init && rosdep update --include-eol-distros
-
-# Install Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-# Make cargo available in later Docker layers
-ENV PATH="/home/${USERNAME}/.cargo/bin:/home/${USERNAME}/.local/bin:${PATH}"
-
-# Build mprocs from source
-RUN git clone https://github.com/pvolok/mprocs.git /home/$USERNAME/mprocs \
- && cd /home/$USERNAME/mprocs \
- && cargo build --release \
- && mkdir -p /home/$USERNAME/.local/bin \
- && install -m 0755 /home/$USERNAME/mprocs/target/release/mprocs /home/$USERNAME/.local/bin/mprocs
 
 USER root
 RUN mkdir -p ${WORKSPACE_DIR} \
@@ -175,8 +152,6 @@ RUN /home/${USERNAME}/venv/bin/pip install --no-cache-dir torch==2.6.0 torchvisi
 
 # Set up bashrc
 RUN echo "alias src_ros='source /opt/ros/$ROS_DISTRO/setup.bash'" >> /home/${USERNAME}/.bashrc
-RUN echo "alias mprocs_listener_talker='mprocs -c ${WORKSPACE_DIR}/.mprocs.yaml'" >> /home/${USERNAME}/.bashrc
-RUN echo "alias mprocs_tbot='mprocs -c ${WORKSPACE_DIR}/.mprocs.yaml'" >> /home/${USERNAME}/.bashrc
 RUN echo "export WORKSPACE_DIR=${WORKSPACE_DIR}" >> /home/${USERNAME}/.bashrc
 RUN echo "export CUDA_HOME=/usr/local/cuda" >> /home/${USERNAME}/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH" >> /home/${USERNAME}/.bashrc
