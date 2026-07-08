@@ -1,0 +1,147 @@
+"""Crop creation, batched visual encoding, and embedding fusion."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Sequence
+
+import numpy as np
+
+
+@dataclass
+class CropEmbedding:
+    bbox_embedding: np.ndarray
+    mask_embedding: np.ndarray
+    fused_embedding: np.ndarray
+
+
+def normalize(vector: np.ndarray) -> np.ndarray | None:
+    value = np.asarray(vector, dtype=np.float32).reshape(-1)
+    norm = float(np.linalg.norm(value))
+    if value.size == 0 or not np.isfinite(norm) or norm <= 1e-12:
+        return None
+    return (value / norm).astype(np.float32)
+
+
+def validate_fusion_weights(bbox_weight: float, mask_weight: float) -> None:
+    if not np.isfinite([bbox_weight, mask_weight]).all():
+        raise ValueError("Embedding fusion weights must be finite")
+    if bbox_weight < 0.0 or mask_weight < 0.0:
+        raise ValueError("Embedding fusion weights must be non-negative")
+    if bbox_weight + mask_weight <= 0.0:
+        raise ValueError("At least one embedding fusion weight must be positive")
+
+
+def fuse_embeddings(
+    bbox_embedding: np.ndarray | None,
+    mask_embedding: np.ndarray | None,
+    bbox_weight: float,
+    mask_weight: float,
+) -> np.ndarray:
+    validate_fusion_weights(bbox_weight, mask_weight)
+    bbox = normalize(bbox_embedding) if bbox_embedding is not None else None
+    mask = normalize(mask_embedding) if mask_embedding is not None else None
+    if bbox is None and mask is None:
+        return np.empty(0, dtype=np.float32)
+    if bbox is None:
+        return mask  # type: ignore[return-value]
+    if mask is None:
+        return bbox
+    if bbox.shape != mask.shape:
+        raise ValueError("BBox and mask embeddings have different dimensions")
+    fused = normalize(bbox_weight * bbox + mask_weight * mask)
+    return fused if fused is not None else np.empty(0, dtype=np.float32)
+
+
+def make_crops(
+    rgb: np.ndarray, box_xyxy: Sequence[float], mask: np.ndarray | None
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return a bbox crop and black-background masked crop."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("RGB frame must have shape HxWx3")
+    height, width = rgb.shape[:2]
+    values = np.asarray(box_xyxy, dtype=np.float64)
+    if values.shape != (4,) or not np.isfinite(values).all():
+        return None, None
+    x1 = max(0, min(width, int(np.floor(values[0]))))
+    y1 = max(0, min(height, int(np.floor(values[1]))))
+    x2 = max(0, min(width, int(np.ceil(values[2]))))
+    y2 = max(0, min(height, int(np.ceil(values[3]))))
+    if x2 <= x1 or y2 <= y1:
+        return None, None
+    bbox_crop = np.ascontiguousarray(rgb[y1:y2, x1:x2])
+    if mask is None or mask.shape != (height, width):
+        return bbox_crop, None
+    object_mask = np.asarray(mask[y1:y2, x1:x2], dtype=bool)
+    if not object_mask.any():
+        return bbox_crop, None
+    masked_crop = np.zeros_like(bbox_crop)
+    masked_crop[object_mask] = bbox_crop[object_mask]
+    return bbox_crop, masked_crop
+
+
+def encode_object_crops(
+    rgb: np.ndarray,
+    boxes: Sequence[Sequence[float]],
+    masks: Sequence[np.ndarray | None],
+    encode_batch: Callable[[Sequence[np.ndarray]], np.ndarray],
+    bbox_weight: float,
+    mask_weight: float,
+    warning: Callable[[str], None] | None = None,
+) -> list[CropEmbedding]:
+    """Encode all bbox crops in one batch and all valid mask crops in one batch."""
+    validate_fusion_weights(bbox_weight, mask_weight)
+    if len(boxes) != len(masks):
+        raise ValueError("Each detection must have exactly one mask entry")
+    crops = [make_crops(rgb, box, mask) for box, mask in zip(boxes, masks)]
+    bbox_indices = [i for i, pair in enumerate(crops) if pair[0] is not None]
+    mask_indices = [i for i, pair in enumerate(crops) if pair[1] is not None]
+
+    bbox_vectors = _run_batch(crops, bbox_indices, 0, encode_batch, "bbox", warning)
+    mask_vectors = _run_batch(crops, mask_indices, 1, encode_batch, "mask", warning)
+    output: list[CropEmbedding] = []
+    empty = np.empty(0, dtype=np.float32)
+    for index in range(len(boxes)):
+        bbox = bbox_vectors.get(index)
+        mask = mask_vectors.get(index)
+        try:
+            fused = fuse_embeddings(bbox, mask, bbox_weight, mask_weight)
+        except ValueError as exc:
+            if warning:
+                warning(f"Object {index} has invalid embeddings: {exc}")
+            bbox, mask, fused = None, None, empty
+        if fused.size == 0 and warning:
+            warning(f"Object {index} has no valid visual embedding")
+        output.append(
+            CropEmbedding(
+                bbox if bbox is not None else empty.copy(),
+                mask if mask is not None else empty.copy(),
+                fused,
+            )
+        )
+    return output
+
+
+def _run_batch(crops, indices, component, encode_batch, label, warning):
+    if not indices:
+        return {}
+    try:
+        encoded = np.asarray(
+            encode_batch([crops[index][component] for index in indices]), dtype=np.float32
+        )
+    except Exception as exc:  # Model failures should not discard otherwise valid proposals.
+        if warning:
+            warning(f"CLIP {label} batch failed: {exc}")
+        return {}
+    if encoded.ndim != 2 or encoded.shape[0] != len(indices):
+        if warning:
+            warning(f"CLIP {label} batch returned an invalid shape: {encoded.shape}")
+        return {}
+    result = {}
+    for index, vector in zip(indices, encoded):
+        normalized = normalize(vector)
+        if normalized is not None:
+            result[index] = normalized
+        elif warning:
+            warning(f"Object {index} has an invalid {label} embedding")
+    return result

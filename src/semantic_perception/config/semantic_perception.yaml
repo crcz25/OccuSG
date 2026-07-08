@@ -1,0 +1,37 @@
+semantic_perception:
+  ros__parameters:
+    rgb_topic: "/camera/color/image_raw"
+    depth_topic: "/camera/depth/image_raw"
+    camera_info_topic: "/camera/color/camera_info"
+    proposal_topic: "/semantic_perception/object_proposals"
+
+    prompt_csv_path: "models/HM3D_CountsOfObjectTypes.csv"
+    class_embedding_cache_path: "models/hm3d_openclip_embedding_cache.bin"
+
+    # OpenCLIP architecture plus an optional local checkpoint. The checkpoint may
+    # also be an OpenCLIP pretrained tag (for example, "laion2b_s32b_b79k").
+    openclip_model: "ViT-H-14"
+    openclip_checkpoint_path: "models/laion2b_s32b_b79k.bin"
+    groundingdino_config_path: "models/GroundingDINO_SwinT_OGC.py"
+    groundingdino_model: "models/groundingdino_swint_ogc.pth"
+    sam_model: "models/mobile_sam.pt"
+    sam_model_type: "vit_t"
+
+    # The large HM3D vocabulary is cached for the later semantic module. Keep
+    # object proposal generation class-agnostic and within DINO's text limit.
+    groundingdino_prompt: "object"
+
+    device: "cuda"
+    devices: ["cuda:0", "cuda:1"]
+    num_worker_threads: 2
+    frame_queue_size: 4
+    result_queue_size: 8
+
+    detection_threshold: 0.35
+    text_threshold: 0.25
+    bbox_embedding_weight: 0.5
+    masked_embedding_weight: 0.5
+    sync_queue_size: 10
+    sync_slop_seconds: 0.1
+    min_valid_depth_points: 20
+    max_depth_m: 10.0
