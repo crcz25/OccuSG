@@ -6,5 +6,3 @@
 	path = src/octomap_mapping
 	url = https://github.com/crcz25/octomap_mapping.git
 	branch = ros2
-	url = https://github.com/Geekgineer/YOLOs-CPP.git
-	branch = main
