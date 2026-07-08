@@ -1,37 +1,77 @@
 semantic_perception:
   ros__parameters:
+    # ROS topic carrying the input RGB image stream.
     rgb_topic: "/camera/color/image_raw"
+    # ROS topic carrying the input depth image stream (16UC1 millimetres or 32FC1 metres).
     depth_topic: "/camera/depth/image_raw"
+    # ROS topic carrying the camera intrinsics (CameraInfo) used for 2D->3D projection.
     camera_info_topic: "/camera/color/camera_info"
+    # ROS topic on which ObjectProposal3DArray results are published.
     proposal_topic: "/semantic_perception/object_proposals"
+    # Debug image: MobileSAM masks + DINO boxes/scores + best OpenCLIP label.
+    # Whether to render and publish the annotated debug image below.
+    publish_debug_image: true
+    # ROS topic for the annotated debug image (only published if publish_debug_image is true).
+    debug_image_topic: "/semantic_perception/debug_image"
+    # Opacity of the mask overlay in the debug image, in [0, 1] (0 = invisible, 1 = opaque).
+    debug_mask_alpha: 0.45
 
+    # Vocabulary CSV used to build the cached OpenCLIP text embeddings (one label per row,
+    # or an HM3D "label;count" table).
     prompt_csv_path: "models/HM3D_CountsOfObjectTypes.csv"
+    # Binary cache of OpenCLIP text embeddings for prompt_csv_path; regenerated automatically
+    # whenever it is missing or the vocabulary/model no longer matches it.
     class_embedding_cache_path: "models/hm3d_openclip_embedding_cache.bin"
 
     # OpenCLIP architecture plus an optional local checkpoint. The checkpoint may
     # also be an OpenCLIP pretrained tag (for example, "laion2b_s32b_b79k").
+    # open_clip architecture name used for visual/text embeddings (e.g. "ViT-H-14").
     openclip_model: "ViT-H-14"
+    # Local OpenCLIP checkpoint file, or an open_clip pretrained tag if it contains no path separator.
     openclip_checkpoint_path: "models/laion2b_s32b_b79k.bin"
+    # Smaller batches reduce peak RAM/VRAM while generating the vocabulary cache.
+    # Number of prompts encoded per OpenCLIP text-encoder batch when building the vocabulary cache.
+    text_embedding_batch_size: 64
+    # Path to the GroundingDINO model config (Python file describing the detector architecture).
     groundingdino_config_path: "models/GroundingDINO_SwinT_OGC.py"
+    # Path to the GroundingDINO detector checkpoint weights.
     groundingdino_model: "models/groundingdino_swint_ogc.pth"
+    # Path to the SAM / MobileSAM segmentation checkpoint weights.
     sam_model: "models/mobile_sam.pt"
+    # SAM model registry key matching sam_model (e.g. "vit_t" for MobileSAM's tiny ViT).
     sam_model_type: "vit_t"
 
     # The large HM3D vocabulary is cached for the later semantic module. Keep
     # object proposal generation class-agnostic and within DINO's text limit.
+    # Open-vocabulary text prompt passed to GroundingDINO for class-agnostic object detection.
     groundingdino_prompt: "object"
 
+    # Fallback compute device for any model whose own *_device override is not set.
     device: "cuda"
+    # Pool of devices assigned round-robin, one per worker thread (index i uses devices[i % len]).
     devices: ["cuda:0", "cuda:1"]
+    # Number of parallel inference worker threads; each thread loads its own full copy of the models.
     num_worker_threads: 2
+    # Max frames buffered per worker's input queue; a frame is dropped once every worker queue is full.
     frame_queue_size: 4
+    # Max completed results buffered awaiting publish; the oldest unpublished result is discarded once full.
     result_queue_size: 8
 
+    # GroundingDINO minimum box confidence for a detection to be kept, in [0, 1].
     detection_threshold: 0.35
+    # GroundingDINO minimum text-match score for a detection to be kept, in [0, 1].
     text_threshold: 0.25
+    # Weight of the whole-bounding-box CLIP embedding when fusing it with the masked-crop embedding.
     bbox_embedding_weight: 0.5
+    # Weight of the mask-only (background removed) CLIP embedding when fusing it with the bbox embedding.
     masked_embedding_weight: 0.5
+    # Queue size of the RGB/depth/CameraInfo ApproximateTimeSynchronizer.
     sync_queue_size: 10
+    # Maximum timestamp difference, in seconds, allowed between RGB/depth/CameraInfo messages to be
+    # considered synchronized.
     sync_slop_seconds: 0.1
+    # Minimum number of valid depth pixels inside a detection's mask/box required to compute 3D geometry;
+    # otherwise the proposal is marked as having no valid 3D data.
     min_valid_depth_points: 20
+    # Maximum depth, in metres, treated as valid; farther/invalid depth pixels are excluded from geometry.
     max_depth_m: 10.0

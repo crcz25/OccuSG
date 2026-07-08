@@ -15,6 +15,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from semantic_perception_msgs.msg import ObjectProposal3D, ObjectProposal3DArray
 
+from semantic_perception.debug_image import render_debug_image
 from semantic_perception.inference.crop_embeddings import validate_fusion_weights
 from semantic_perception.worker import Frame, FrameResult, WorkerPool
 
@@ -31,6 +32,12 @@ class SemanticPerceptionNode(Node):
         self._publisher = self.create_publisher(
             ObjectProposal3DArray, str(config["proposal_topic"]), 10
         )
+        self._debug_mask_alpha = float(config["debug_mask_alpha"])
+        self._debug_publisher = None
+        if bool(config["publish_debug_image"]):
+            self._debug_publisher = self.create_publisher(
+                Image, str(config["debug_image_topic"]), 1
+            )
         self._workers = WorkerPool(
             config,
             lambda message: self.get_logger().warning(message),
@@ -58,6 +65,10 @@ class SemanticPerceptionNode(Node):
             f"Listening for synchronized RGB-D frames on {config['rgb_topic']} and "
             f"{config['depth_topic']}"
         )
+        if self._debug_publisher is not None:
+            self.get_logger().info(
+                f"Publishing inference debug images on {config['debug_image_topic']}"
+            )
 
     def _declare_parameters(self) -> None:
         defaults = {
@@ -65,10 +76,14 @@ class SemanticPerceptionNode(Node):
             "depth_topic": "/camera/depth/image_raw",
             "camera_info_topic": "/camera/color/camera_info",
             "proposal_topic": "/semantic_perception/object_proposals",
+            "publish_debug_image": False,
+            "debug_image_topic": "/semantic_perception/debug_image",
+            "debug_mask_alpha": 0.45,
             "prompt_csv_path": "models/HM3D_CountsOfObjectTypes.csv",
             "class_embedding_cache_path": "models/hm3d_openclip_embedding_cache.bin",
             "openclip_model": "ViT-H-14",
             "openclip_checkpoint_path": "models/laion2b_s32b_b79k.bin",
+            "text_embedding_batch_size": 64,
             "groundingdino_config_path": "models/GroundingDINO_SwinT_OGC.py",
             "groundingdino_model": "models/groundingdino_swint_ogc.pth",
             "sam_model": "models/mobile_sam.pt",
@@ -136,6 +151,10 @@ class SemanticPerceptionNode(Node):
                 raise ValueError(f"{name} must be between 0 and 1")
         if not str(config["groundingdino_prompt"]).strip():
             raise ValueError("groundingdino_prompt must not be empty")
+        if int(config["text_embedding_batch_size"]) <= 0:
+            raise ValueError("text_embedding_batch_size must be positive")
+        if not 0.0 <= float(config["debug_mask_alpha"]) <= 1.0:
+            raise ValueError("debug_mask_alpha must be between 0 and 1")
         if int(config["sync_queue_size"]) <= 0 or float(config["sync_slop_seconds"]) < 0.0:
             raise ValueError("Synchronization queue size must be positive and slop non-negative")
 
@@ -157,10 +176,13 @@ class SemanticPerceptionNode(Node):
             return
         fx, fy, cx, cy = camera_info.k[0], camera_info.k[4], camera_info.k[2], camera_info.k[5]
         if fx <= 0.0 or fy <= 0.0:
-            self.get_logger().warning("CameraInfo is uncalibrated; proposals will have invalid 3D data")
+            self.get_logger().warning(
+                "CameraInfo is uncalibrated; proposals will have invalid 3D data"
+            )
         if rgb.shape[:2] != depth.shape:
             self.get_logger().warning(
-                "RGB and depth resolutions differ; 3D geometry will be invalid until aligned depth is used"
+                "RGB and depth resolutions differ; 3D geometry will be invalid "
+                "until aligned depth is used"
             )
         frame = Frame(
             sequence=next(self._sequence),
@@ -198,7 +220,8 @@ class SemanticPerceptionNode(Node):
         message.header.frame_id = result.frame.frame_id
         if result.error:
             self.get_logger().warning(
-                f"Publishing empty proposal array for failed frame {result.frame.sequence}: {result.error}"
+                f"Publishing empty proposal array for failed frame "
+                f"{result.frame.sequence}: {result.error}"
             )
         for identifier, proposal in enumerate(result.proposals):
             item = ObjectProposal3D()
@@ -239,6 +262,26 @@ class SemanticPerceptionNode(Node):
             # Similarity and entropy retain their zero defaults by design.
             message.proposals.append(item)
         self._publisher.publish(message)
+        if self._debug_publisher is not None:
+            self._publish_debug_result(result, message)
+
+    def _publish_debug_result(
+        self, result: FrameResult, proposal_message: ObjectProposal3DArray
+    ) -> None:
+        try:
+            rendered = render_debug_image(
+                result.frame.rgb,
+                result.proposals,
+                self._workers.best_class,
+                self._debug_mask_alpha,
+            )
+            debug_message = self._bridge.cv2_to_imgmsg(rendered, encoding="bgr8")
+            debug_message.header = proposal_message.header
+            self._debug_publisher.publish(debug_message)
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Failed to render debug image for frame {result.frame.sequence}: {exc}"
+            )
 
     def destroy_node(self) -> bool:
         if hasattr(self, "_workers"):

@@ -163,6 +163,11 @@ def load_or_generate(
         )
     matrix = _normalize_rows(matrix)
     write_cache(cache_path, matrix, digest)
+    if logger:
+        logger(
+            f"Generated text embedding cache: {cache_path} "
+            f"({matrix.shape[0]} prompts x {matrix.shape[1]} dimensions)"
+        )
     return prompts, matrix, False
 
 

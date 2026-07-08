@@ -8,7 +8,6 @@ services:
         USERNAME: devuser
         USER_UID: 1000
         USER_GID: 1000
-        USE_GPU: ${USE_GPU:-ON}
     image: occusg:latest
     restart: "no"
 
@@ -21,12 +20,9 @@ services:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       TURTLEBOT3_MODEL: waffle
       PROJECT_WS: /workspace/occusg_ws
-      USE_GPU: ${USE_GPU:-ON}
 
     volumes:
-      - ../src:/workspace/occusg_ws/src:cached
-      - ../bags:/workspace/occusg_ws/bags:cached
-      - ../models:/workspace/occusg_ws/models:cached
+      - ..:/workspace/occusg_ws:cached
       - ${HOME}/.Xauthority:/home/devuser/.Xauthority:rw
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /dev/dri:/dev/dri

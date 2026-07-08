@@ -64,3 +64,20 @@ def test_hm3d_count_table_extracts_only_labels(tmp_path):
     assert prompts == observed == ["wall", "chair"]
     assert matrix.shape == (2, 2)
     assert not reused
+
+
+def test_generation_logs_completed_cache_dimensions(tmp_path):
+    csv_path = tmp_path / "classes.csv"
+    cache_path = tmp_path / "cache.bin"
+    csv_path.write_text("chair\ntable\n", encoding="utf-8")
+    messages = []
+
+    load_or_generate(
+        csv_path,
+        cache_path,
+        "model",
+        lambda prompts: np.ones((len(prompts), 3), dtype=np.float32),
+        messages.append,
+    )
+
+    assert messages[-1].endswith("(2 prompts x 3 dimensions)")

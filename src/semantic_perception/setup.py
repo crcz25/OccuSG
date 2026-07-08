@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "semantic_perception_node = semantic_perception.node:main",
+            "semantic_perception_standalone = semantic_perception.standalone:main",
         ],
     },
 )

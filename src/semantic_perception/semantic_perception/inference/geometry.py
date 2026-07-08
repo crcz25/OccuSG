@@ -28,8 +28,13 @@ def compute_geometry(
     intrinsics: Sequence[float],
     min_valid_points: int = 20,
     max_depth_m: float = 10.0,
+    camera_to_world: np.ndarray | None = None,
 ) -> Geometry3D:
-    """Project valid masked depths with pinhole intrinsics in the camera frame."""
+    """Project valid masked depths, optionally into a world coordinate frame.
+
+    ``camera_to_world`` follows the common homogeneous column-vector convention:
+    ``point_world = camera_to_world @ [x, y, z, 1]``.
+    """
     if depth_m.ndim != 2 or min_valid_points <= 0 or max_depth_m <= 0.0:
         return Geometry3D.invalid()
     values = np.asarray(intrinsics, dtype=np.float64)
@@ -63,6 +68,16 @@ def compute_geometry(
     x = (columns.astype(np.float64) - cx) * z / fx
     y = (rows.astype(np.float64) - cy) * z / fy
     points = np.column_stack((x, y, z))
+    if camera_to_world is not None:
+        transform = np.asarray(camera_to_world, dtype=np.float64)
+        if transform.shape != (4, 4) or not np.isfinite(transform).all():
+            return Geometry3D.invalid()
+        homogeneous = np.column_stack((points, np.ones(points.shape[0], dtype=np.float64)))
+        transformed = homogeneous @ transform.T
+        scales = transformed[:, 3]
+        if np.any(np.abs(scales) <= 1e-12):
+            return Geometry3D.invalid()
+        points = transformed[:, :3] / scales[:, None]
     if not np.isfinite(points).all():
         return Geometry3D.invalid()
     return Geometry3D(

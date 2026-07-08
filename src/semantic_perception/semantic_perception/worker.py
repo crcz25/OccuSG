@@ -24,6 +24,7 @@ class Frame:
     rgb: np.ndarray
     depth_m: np.ndarray
     intrinsics: tuple[float, float, float, float]
+    camera_to_world: np.ndarray | None = None
 
 
 @dataclass
@@ -76,7 +77,7 @@ class WorkerPool:
         self.prompts, self.text_embeddings, _ = load_or_generate(
             config["prompt_csv_path"],
             config["class_embedding_cache_path"],
-            config["openclip_model"],
+            self._models[0].clip.cache_key,
             self._models[0].clip.encode_texts,
             info,
         )
@@ -115,6 +116,17 @@ class WorkerPool:
             return self._results.get_nowait()
         except queue.Empty:
             return None
+
+    def best_class(self, embedding: np.ndarray) -> tuple[str, float]:
+        """Return the closest cached OpenCLIP class for debug visualization."""
+        value = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        if value.size == 0 or value.size != self.text_embeddings.shape[1]:
+            return "", 0.0
+        scores = self.text_embeddings @ value
+        if scores.size == 0 or not np.isfinite(scores).any():
+            return "", 0.0
+        index = int(np.nanargmax(scores))
+        return self.prompts[index], float(scores[index])
 
     def close(self) -> None:
         self._stopping.set()
@@ -172,6 +184,7 @@ class WorkerPool:
                 frame.intrinsics,
                 int(self._config["min_valid_depth_points"]),
                 float(self._config["max_depth_m"]),
+                frame.camera_to_world,
             )
             proposals.append(Proposal(detection, mask, embedding, geometry))
         return FrameResult(frame, proposals)

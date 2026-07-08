@@ -1,418 +1,288 @@
 # OccuSG
 
-OccuSG is the implementation of `Occupancy-Grounded Room Segmentation for Hierarchical 3D Scene Graphs` a ROS 2 Humble workspace for occupancy-based room/region grounding and scene graph generation. The pipeline combines depth-to-point-cloud projection, OctoMap occupancy integration, 3D-to-2D free-space projection, incremental DuDe region decomposition, YOLO/ONNX semantic perception, and `scene_graph_core` / `scene_graph_ros` graph construction, with Matterport3D bag launch and evaluation scripts included in this repository.
+OccuSG is a ROS 2 Humble workspace for occupancy-grounded room segmentation and
+hierarchical 3D scene graphs. The intended pipeline combines RGB-D perception,
+point-cloud generation, occupancy mapping, room decomposition, and scene-graph
+construction.
 
 ![OccuSG pipeline overview](img/pipeline.svg)
-
 
 ## Paper and citation
 
 ```bibtex
 @misc{occusg2026,
-      title={Occupancy-Grounded Room Segmentation for Hierarchical 3D Scene Graphs}, 
+      title={Occupancy-Grounded Room Segmentation for Hierarchical 3D Scene Graphs},
       author={Carlos Cueto Zumaya and Iacopo Catalano and Jorge Peña-Queralta and Wallace Moreira Bessa},
       year={2026},
       eprint={2606.13727},
       archivePrefix={arXiv},
       primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2606.13727}, 
+      url={https://arxiv.org/abs/2606.13727},
 }
 ```
 
-Some included components have their own citations. See `src/mapconversion/README.md` for the free-space projection / map conversion paper and `src/incremental_dude_ros2/incremental_dude_ros2/Third_Party/dude_final/README` for the original DuDe citation.
+## Current workspace contents
 
-## Installation
+`colcon list` currently discovers these seven packages:
 
-This repository is laid out as a ROS 2 workspace root:
+| Package | Build type | Role |
+|---|---|---|
+| `incremental_dude_msgs` | `ament_cmake` | Region interface messages. |
+| `incremental_dude_ros2` | `ament_cmake` | Incremental DuDe room decomposition. |
+| `point_cloud_generator` | `ament_python` | Synchronized depth-to-point-cloud projection. |
+| `scene_graph_core` | `ament_python` | Scene-graph data structures and algorithms. |
+| `scene_graph_ros` | `ament_python` | ROS orchestration, visualization, export, and evaluation utilities. |
+| `semantic_perception_msgs` | `ament_cmake` | RGB-D object-proposal interfaces. |
+| `semantic_perception` | `ament_python` | GroundingDINO, MobileSAM, and OpenCLIP inference. |
 
-```text
-OccuSG/
-  .devcontainer/
-  overrides/
-  src/
-    point_cloud_generator/
-    scene_graph_core/
-    scene_graph_ros/
-    semantic_perception/
-    incremental_dude_ros2/
-    mapconversion/
-    octomap_mapping/
-```
+The checked-out `src/mapconversion/` and `src/octomap_mapping/` directories are
+empty and are not Colcon packages. The two `scene_graph_ros` pipeline launch
+files still reference `mapconversion` and the former ONNX/YOLO semantic node.
+They are therefore not supported end-to-end entry points in this checkout. The
+standalone semantic pipeline and `semantic_perception.launch.py` are current.
 
-Workspace packages:
+## Dependency model
 
-| Package | Role |
-|---|---|
-| `point_cloud_generator` | Converts synchronized depth images and camera info into `sensor_msgs/PointCloud2`. |
-| `semantic_perception` | Runs YOLO segmentation through ONNX Runtime and publishes 3D detections. |
-| `octomap_server` / `octomap_mapping` | Builds and publishes OctoMap occupancy maps from point clouds. |
-| `mapconversion` / `mapconversion_msgs` | Projects 3D voxel/OctoMap data into 2D occupancy and height/slope maps. |
-| `incremental_dude_ros2` / `incremental_dude_msgs` | Decomposes 2D occupancy into stable regions and publishes `/dude/regions`. |
-| `scene_graph_core` | Provides the Python scene graph data structures, services, and JSON serialization. |
-| `scene_graph_ros` | Orchestrates ROS inputs, managers, visualization, JSON export, launch files, and evaluation/profiling scripts. |
+Use Ubuntu 22.04, Python 3.10, and ROS 2 Humble. Dependencies are intentionally
+split between the operating system and one Python virtual environment.
 
-### Requirements
+### System and ROS dependencies
 
-- Ubuntu 22.04, as used by `.devcontainer/humble.Dockerfile`
-- ROS 2 Humble, colcon, rosdep, and the ROS dependencies declared in the package manifests
-- C++17 compiler and CMake
-- Python 3 with `numpy`, `scipy`, `networkx`, and `shapely` for the scene graph and evaluation scripts
-- OpenCV, PCL, Eigen, CGAL, fmt, glog, yaml-cpp, Boost, OctoMap, and ROS message/filter/TF dependencies used by the C++ packages
-- ONNX Runtime 1.19.2 under `/opt/onnxruntime-linux-x64-1.19.2` for CPU builds or `/opt/onnxruntime-linux-x64-gpu-1.19.2` for GPU builds, unless `ONNXRUNTIME_DIR` is set manually
-- For GPU inference: CUDA-capable NVIDIA driver/runtime, ONNX Runtime with `CUDAExecutionProvider`, and the build flag `-DONNXRUNTIME_USE_GPU=ON`
+Install ROS, compiler, interface, and native C++ dependencies with apt/rosdep.
+Do not install ROS packages such as `rclpy` or `cv_bridge` from pip.
 
-The docker container installs CUDA 12.4.1, ROS Humble desktop, ONNX Runtime, PyTorch CUDA wheels, TensorRT Python packages, and common development tools.
+Required system components include:
 
-### Docker
+- ROS 2 Humble desktop, `ros-dev-tools`, Colcon, and rosdep;
+- a C++17 compiler, CMake, Git, and Python's venv support;
+- OpenCV development libraries for `incremental_dude_ros2`;
+- CGAL, GMP, and MPFR for the DuDe implementation;
+- the ROS packages declared in each `package.xml`.
 
-Docker support is provided through the devcontainer files:
-
-- `.devcontainer/humble.Dockerfile`
-- `.devcontainer/docker-compose-humble.yml`
-- `.devcontainer/devcontainer.json`
-
-The compose service is named `dev`, builds the image `occusg:latest`, runs with `network_mode: host`, reserves all NVIDIA GPUs, mounts host `src/` into `/workspace/occusg_ws/src`, host `bags/` into `/workspace/occusg_ws/bags`, and host `models/` into `/workspace/occusg_ws/models`. The Docker build argument `USE_GPU` defaults to `ON` and is also exposed inside the container as `USE_GPU`.
-
-Host requirements for the GPU container are Docker with Compose support, an NVIDIA driver compatible with CUDA 12.4, and the NVIDIA Container Toolkit. The Docker image itself is based on `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`.
-
-Enable X11 access before launching the container if you want RViz or other GUI tools:
+After configuring the official ROS 2 apt repository, a typical base install is:
 
 ```bash
-sudo xhost +local:docker
+sudo apt-get update
+sudo apt-get install -y \
+  ros-humble-desktop \
+  ros-dev-tools \
+  build-essential \
+  cmake \
+  git \
+  python3-venv \
+  libcgal-dev \
+  libgmp-dev \
+  libmpfr-dev \
+  libopencv-dev
 ```
 
-Build and start the development container from the repository root. You can then attach VS Code to the running container.
+The build script initializes rosdep when necessary and installs dependencies
+declared by the package manifests. To do this manually:
+
+```bash
+source /opt/ros/humble/setup.bash
+sudo rosdep init       # once per machine; skip if already initialized
+rosdep update --include-eol-distros
+rosdep install --from-paths src --ignore-src -r -y
+```
+
+### Python inference environment
+
+Torch, torchvision, OpenCLIP, GroundingDINO, MobileSAM, Transformers, and their
+Python image-processing dependencies are pinned in
+[`src/semantic_perception/requirements.txt`](src/semantic_perception/requirements.txt).
+They must be installed in the venv, not globally.
+
+The default environment location is `$HOME/venv`, matching the devcontainer:
+
+```bash
+cd /path/to/occusg_ws
+src/semantic_perception/scripts/create_inference_env.sh
+source "$HOME/venv/bin/activate"
+```
+
+To use another location, set `VENV_PATH` consistently:
+
+```bash
+VENV_PATH="$PWD/.venv" \
+  src/semantic_perception/scripts/create_inference_env.sh
+source "$PWD/.venv/bin/activate"
+```
+
+The venv is created with `--system-site-packages`. This is required so the venv
+interpreter can import apt-installed ROS modules while keeping the large
+inference stack isolated.
+
+## Build the complete workspace
+
+### One-command build
+
+From a clean terminal, after the system/ROS prerequisites above are installed:
+
+```bash
+cd /path/to/occusg_ws
+./scripts/build_workspace.sh
+```
+
+The script:
+
+1. sources `/opt/ros/${ROS_DISTRO:-humble}/setup.bash`;
+2. creates `${VENV_PATH:-$HOME/venv}` if it does not exist;
+3. verifies that the venv imports both `rclpy` and Torch;
+4. installs declared apt/ROS dependencies through rosdep;
+5. runs `pip check`;
+6. builds every discovered package with the venv's Python.
+
+After it completes, source the workspace in the terminal where ROS commands will
+run:
+
+```bash
+source install/setup.bash
+```
+
+Useful environment overrides are:
+
+```bash
+# Use an existing environment at a custom location.
+VENV_PATH="$PWD/.venv" ./scripts/build_workspace.sh
+
+# Skip rosdep on repeated/offline builds after system dependencies are installed.
+SKIP_ROSDEP=1 ./scripts/build_workspace.sh
+
+# Forward additional arguments to `colcon build`.
+SKIP_ROSDEP=1 ./scripts/build_workspace.sh --executor sequential
+```
+
+### Equivalent manual build
+
+The critical detail is invoking Colcon through the venv interpreter. Activating
+the venv and then running `/usr/bin/colcon` is not equivalent: it can generate
+ROS Python entry points with a `#!/usr/bin/python3` shebang, which cannot import
+Torch.
+
+```bash
+cd /path/to/occusg_ws
+source /opt/ros/humble/setup.bash
+source "${VENV_PATH:-$HOME/venv}/bin/activate"
+
+rosdep install --from-paths src --ignore-src -r -y
+python -m pip check
+python -m colcon build \
+  --symlink-install \
+  --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+source install/setup.bash
+```
+
+## Build only `semantic_perception`
+
+On a fresh workspace, build the message dependency and package together:
+
+```bash
+cd /path/to/occusg_ws
+source /opt/ros/humble/setup.bash
+source "${VENV_PATH:-$HOME/venv}/bin/activate"
+
+python -m colcon build \
+  --symlink-install \
+  --packages-up-to semantic_perception
+source install/setup.bash
+```
+
+For subsequent code-only rebuilds after `semantic_perception_msgs` is installed:
+
+```bash
+python -m colcon build \
+  --symlink-install \
+  --packages-select semantic_perception
+source install/setup.bash
+```
+
+Verify that the generated executable uses the venv:
+
+```bash
+head -1 install/semantic_perception/lib/semantic_perception/semantic_perception_node
+```
+
+The first line must point to `${VENV_PATH:-$HOME/venv}/bin/python`. If an older
+build points to `/usr/bin/python3`, remove only
+`build/semantic_perception` and `install/semantic_perception`, then rebuild with
+`python -m colcon` as shown above.
+
+## Docker/devcontainer
+
+The development image is based on
+`nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`. It installs ROS Humble, native
+build dependencies, and `/home/devuser/venv` from the same pinned semantic
+requirements. The repository is mounted at `/workspace/occusg_ws`.
 
 ```bash
 docker compose -f .devcontainer/docker-compose-humble.yml up -d --build
 docker compose -f .devcontainer/docker-compose-humble.yml exec dev bash
 ```
 
-Alternatively, open the repository in VS Code and select Reopen in Container to build and attach VS Code directly to the development environment.
+The container entrypoint runs the same venv-aware workspace build script. The
+compose file reserves NVIDIA GPUs, so Docker GPU use requires a compatible host
+driver and the NVIDIA Container Toolkit.
 
-To build the same container with CPU ONNX Runtime selected, pass `USE_GPU=OFF`:
+## ONNX Runtime and GPU selection
+
+The current source tree has no ONNX Runtime consumer and no CMake target reads
+`ONNXRUNTIME_DIR` or `ONNXRUNTIME_USE_GPU`. Those dependencies and build flags
+were removed from the documented and container build process.
+
+The `model_file`, `class_file`, and `use_gpu` keys that remain in
+`scene_graph_ros/config/scene_graph_pipeline_params*.yaml` belong to the former
+YOLO/ONNX node. The current `semantic_perception` node does not declare or read
+them. Do not pass `use_gpu` to the current node.
+
+Current device selection is:
+
+- ROS node: `device` and `devices` parameters in
+  `src/semantic_perception/config/semantic_perception.yaml`;
+- standalone runner: `--device` and `--openclip-device`;
+- Docker GPU exposure: NVIDIA Container Toolkit and Compose device reservation.
+
+## Current launch and runtime entry points
+
+The supported semantic launch command has one launch argument, `config`:
 
 ```bash
-USE_GPU=OFF docker compose -f .devcontainer/docker-compose-humble.yml up -d --build
+source install/setup.bash
+ros2 launch semantic_perception semantic_perception.launch.py \
+  config:=/absolute/path/to/semantic_perception.yaml
 ```
 
-To manually build the workspace from inside the container, run:
+The model files are runtime assets and are not required to compile the workspace.
+See [`src/semantic_perception/README.md`](src/semantic_perception/README.md) for
+model names, standalone validation, ROS parameters, rosbag testing, debug images,
+and CPU/GPU guidance.
+
+The launch arguments declared in
+`scene_graph_pipeline_mp3d_bag.launch.py` and
+`scene_graph_pipeline.tbot3.launch.py` still exist syntactically, but those
+launches are not valid end-to-end entry points in the current checkout for the
+reasons described above.
+
+## Tests
+
+Run the standalone semantic tests inside the inference venv:
 
 ```bash
-cd /workspace/occusg_ws
+source "${VENV_PATH:-$HOME/venv}/bin/activate"
+PYTHONPATH=src/semantic_perception \
+  python -m pytest -q src/semantic_perception/test
+```
+
+Run Colcon tests for the built workspace with:
+
+```bash
 source /opt/ros/humble/setup.bash
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install \
-  --cmake-args \
-    -DONNXRUNTIME_USE_GPU=${USE_GPU:-ON} \
-    -DONNXRUNTIME_DIR=/opt/onnxruntime-current \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+source "${VENV_PATH:-$HOME/venv}/bin/activate"
 source install/setup.bash
+python -m colcon test
+python -m colcon test-result --verbose
 ```
 
-In Docker, `USE_GPU=ON` selects `/opt/onnxruntime-linux-x64-gpu-1.19.2` through the fixed `/opt/onnxruntime-current` symlink, and `USE_GPU=OFF` selects `/opt/onnxruntime-linux-x64-1.19.2`. Pass the same value to CMake as `ONNXRUNTIME_USE_GPU`; runtime inference is controlled by the `semantic_node` ROS parameter `use_gpu`.
-
-### Manual installation
-
-Manual installation has not been tested in this repository. The repository itself is a workspace root, so clone it as the workspace:
-
-```bash
-git clone --recursive git@github.com:crcz25/OccuSG.git ~/occusg_ws
-cd ~/occusg_ws
-source /opt/ros/humble/setup.bash
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install \
-  --cmake-args -DONNXRUNTIME_USE_GPU=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-source install/setup.bash
-```
-
-For CPU-only semantic perception, use the CPU ONNX Runtime tree and leave GPU support off:
-
-```bash
-colcon build --symlink-install \
-  --cmake-args -DONNXRUNTIME_USE_GPU=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-```
-
-If ONNX Runtime is installed somewhere else, pass it explicitly:
-
-```bash
-colcon build --symlink-install \
-  --cmake-args \
-    -DONNXRUNTIME_USE_GPU=ON \
-    -DONNXRUNTIME_DIR=/path/to/onnxruntime-linux-x64-gpu-1.19.2 \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-```
-
-`semantic_perception` declares a runtime ROS parameter named `use_gpu`. When the package is built without `-DONNXRUNTIME_USE_GPU=ON`, the node logs a warning and forces CPU inference even if `use_gpu:=true` is configured.
-
-## Usage
-
-### Matterport3D Dataset
-
-The MP3D bags can be accessed from this pCloud link: <https://e.pcloud.link/publink/show?code=kZmQKrZbsoxdOHzsdjd9Xn2OOqUBJA8LbKX>.
-
-When using Docker, place each downloaded bag directory under the repository's `bags/` directory on the host. This directory is mounted into the container at `/workspace/occusg_ws/bags`, so a host bag at `bags/<scan_id>` is available inside Docker as `/workspace/occusg_ws/bags/<scan_id>`.
-
-The ONNX semantic segmentation model is available from the same pCloud link as the bags. Place the model files under the repository's `models/` directory on the host, similar to the bag data. This directory is mounted into the container at `/workspace/occusg_ws/models`, and the default parameter files expect `models/yolo26x-seg.onnx` and `models/coco.names`.
-
-The main Matterport3D bag entry point is:
-
-```bash
-ros2 launch scene_graph_ros scene_graph_pipeline_mp3d_bag.launch.py \
-  bag_path:=/path/to/mp3d/bags \
-  scan_id:=<scan_id>
-```
-
-The launch file expects the bag directory to exist at:
-
-```text
-<bag_path>/<scan_id>
-```
-
-It starts:
-
-- `ros2 bag play <bag_path>/<scan_id> --clock`
-- `point_cloud_generator/depth_to_pointcloud`
-- `octomap_server/octomap_server_node`
-- `mapconversion/map_conversion_oct_node`
-- `semantic_perception/semantic_perception`
-- `incremental_dude_ros2/inc_dude`
-- `scene_graph_ros/scene_graph_region`
-- `rviz2`, when `use_rviz:=true`
-
-Launch arguments:
-
-| Argument | Default | Purpose |
-|---|---|---|
-| `bag_path` | required | Directory containing MP3D bag folders. |
-| `scan_id` | required | MP3D bag folder/name under `bag_path`. |
-| `params_file` | `scene_graph_ros/config/scene_graph_pipeline_params_mp3d.yaml` | Shared ROS parameter YAML for the pipeline. |
-| `inc_dude_params_file` | `incremental_dude_ros2/config/inc_dude_params.yaml` | Parameter YAML for incremental DuDe. |
-| `rviz_config` | `scene_graph_ros/config/rviz_mp3d_bag.rviz` | RViz config file. |
-| `use_rviz` | `true` | Start RViz2. |
-| `use_sim_time` | `true` | Use `/clock` from `ros2 bag play --clock`. |
-| `region_map_topic` | `/mapUAV` | Occupancy grid topic consumed by `incremental_dude_ros2`. |
-| `stable_regions_topic` | `/dude/regions` | Stable region topic consumed by `scene_graph_region`. |
-| `enable_profiling` | `false` | Enable runtime profiling JSON output for nodes that implement the profiling parameters. |
-| `profiling_output_path` | `<bag_path>/<scan_id>/profiling` | Directory for profiling JSON files. |
-| `profiling_run_name` | `<scan_id>_region` | Prefix for profiling files. |
-| `profiling_save_on_shutdown` | `true` | Save profiling files on node shutdown. |
-| `profiling_discard_first_n` | `5` | Warmup samples discarded from profiling summaries. |
-
-Example with profiling and no RViz:
-
-```bash
-ros2 launch scene_graph_ros scene_graph_pipeline_mp3d_bag.launch.py \
-  bag_path:=/workspace/occusg_ws/bags \
-  scan_id:=17DRP5sb8fy \
-  use_rviz:=false \
-  enable_profiling:=true
-```
-
-The launch file remaps or overrides the MP3D bag topics to `/rgb`, `/depth`, `/depth/camera_info`, `/odom`, `/pointcloud`, `octomap_full`, `/mapUAV`, and `/dude/regions`. If your bag uses different names, adapt the launch file or parameter YAML.
-
-### TurtleBot3 Gazebo Simulator
-
-The pipeline can also be run against the TurtleBot3 simulator in Gazebo. Start Gazebo first from a TurtleBot3 workspace, then launch the OccuSG TurtleBot3 pipeline from the OccuSG workspace.
-
-Example with the hospital world:
-
-```bash
-ros2 launch turtlebot3_gazebo turtlebot3_world.launch.py \
-  world:=/home/devuser/gazebo_assets/worlds/hospital/hospital.world \
-  x_pose:=0 \
-  y_pose:=14 \
-  gui:=true
-```
-
-In a second terminal:
-
-```bash
-cd /workspace/occusg_ws
-source install/setup.bash
-ros2 launch scene_graph_ros scene_graph_pipeline.tbot3.launch.py
-```
-
-Known Gazebo world directories under `/home/devuser/gazebo_assets/worlds/` are listed below. These maps are available but have not all been tested with the OccuSG pipeline.
-
-```text
-bookstore/
-dynamic_obstacle/
-dynamic_world/
-empty_room/
-experiment_rooms/
-factory/
-hospital/
-office/
-random_world/
-room_with_walls_1/
-room_with_walls_2/
-small_house/
-star_room_with_walls/
-turtlebot3_world/
-```
-
-The TurtleBot3 simulator publishes the camera, depth, odometry, TF, and robot state topics consumed by the pipeline. A typical topic list is:
-
-```text
-/clock
-/cmd_vel
-/imu
-/intel_realsense_r200_depth/camera_info
-/intel_realsense_r200_depth/depth/camera_info
-/intel_realsense_r200_depth/depth/image_raw
-/intel_realsense_r200_depth/image_raw
-/intel_realsense_r200_depth/points
-/intel_realsense_r200_rgb/camera_info
-/intel_realsense_r200_rgb/image_raw
-/joint_states
-/odom
-/parameter_events
-/performance_metrics
-/robot_description
-/rosout
-/tf
-/tf_static
-```
-
-### Outputs
-
-For the Matterport3D bag launch, the scene graph JSON export path is set in the launch file to:
-
-```text
-<bag_path>/<scan_id>/scene_graph.json
-```
-
-The JSON export happens on shutdown when `export_json_on_shutdown` is true. If `export_json_path` points to a directory or has no file suffix, `scene_graph_ros/json_export.py` writes `scene_graph.json` inside that directory.
-
-With `enable_profiling:=true`, profiling output defaults to:
-
-```text
-<bag_path>/<scan_id>/profiling/
-```
-
-## Evaluation scripts
-
-Evaluation scripts live in `src/scene_graph_ros/scripts`. The OccuSG scripts are standalone Python tools; they do not launch ROS nodes.
-
-### Metric scripts
-
-Evaluate predicted object nodes against Matterport3D `.house` object records:
-
-```bash
-python3 src/scene_graph_ros/scripts/evaluate_mp3d_objects.py \
-  --graph_json /path/to/results/<scan_id>/scene_graph.json \
-  --scan_root /path/to/mp3d/dataset/v1/scans/<scan_id> \
-  --scan_id <scan_id> \
-  --output_csv /path/to/evals/object_eval_matches.csv \
-  --output_json /path/to/evals/object_eval_summary.json
-```
-
-The script reports `percent_found`, `percent_correct`, and average matched-object position error. If output paths are provided, the scan id is inserted into the filenames, for example `object_eval_summary_<scan_id>.json`.
-
-Evaluate predicted room/region footprints against Matterport3D region records:
-
-```bash
-python3 src/scene_graph_ros/scripts/evaluate_mp3d_regions.py \
-  --scan_id <scan_id> \
-  --dsg_dir /path/to/results/<scan_id> \
-  --mp3d_root /path/to/mp3d/dataset/v1/scans \
-  --output_dir /path/to/evals \
-  --auto_align
-```
-
-The region evaluator locates `scene_graph.json` under `--dsg_dir`, reads Matterport3D `house_segmentations` data from `--mp3d_root/<scan_id>`, and writes:
-
-```text
-region_eval_summary_<scan_id>.csv
-region_eval_summary_<scan_id>.json
-region_eval_pairwise_<scan_id>.csv
-region_eval_pairwise_<scan_id>.json
-```
-
-Aggregate existing OccuSG MP3D object and region evaluation outputs:
-
-```bash
-python3 src/scene_graph_ros/scripts/collect_mp3d_eval_tables.py \
-  --scans_root /path/to/eval/scans_root \
-  --output_dir /path/to/eval/tables \
-  --verbose
-```
-
-By default, the collector looks for object model result directories named `y11` and `y26`, and for region results under `regions`. It writes:
-
-```text
-object_detection_results.csv
-region_segmentation_results.csv
-region_segmentation_dataset_summary.csv
-```
-
-Hydra comparison scripts are also present:
-
-```bash
-python3 src/scene_graph_ros/scripts/evaluate_hydra_mp3d_objects.py \
-  --scan_id <scan_id> \
-  --hydra_dir /path/to/hydra/results \
-  --mp3d_root /path/to/mp3d/dataset/v1/scans \
-  --output_dir /path/to/hydra/evals
-
-python3 src/scene_graph_ros/scripts/evaluate_hydra_mp3d_regions.py \
-  --scan_id <scan_id> \
-  --hydra_dir /path/to/hydra/results \
-  --mp3d_root /path/to/mp3d/dataset/v1/scans \
-  --output_dir /path/to/hydra/evals \
-  --auto_align
-
-python3 src/scene_graph_ros/scripts/collect_hydra_mp3d_eval_tables.py \
-  --results_dir /path/to/hydra/evals \
-  --output_dir /path/to/hydra/tables \
-  --verbose
-```
-
-The Hydra object evaluator writes `object_eval_matches_<scan_id>.csv` and `object_eval_summary_<scan_id>.json`. The Hydra region evaluator writes the same region summary and pairwise filenames as the OccuSG region evaluator. The Hydra collector writes the same table filenames as `collect_mp3d_eval_tables.py`.
-
-`run_all_region_evals.sh` contains hard-coded local paths under `/home/crcz/repos/...`; treat it as a local batch helper rather than a portable user-facing entry point.
-
-### Profiling
-
-By default, profiling files are written to:
-
-```text
-<bag_path>/<scan_id>/profiling/
-```
-
-Current profiling implementations in this repository emit:
-
-```text
-<scan_id>_region.point_cloud_generator.json
-<scan_id>_region.incremental_dude.json
-<scan_id>_region.scene_graph_region.json
-```
-
-The launch file also forwards profiling parameters to `octomap_server` and `mapconversion`, but the checked-in `src/octomap_mapping` and `src/mapconversion` code does not currently implement these profiling parameters or emit profiling JSON files.
-
-Each profiling file stores raw stage samples in milliseconds plus summary statistics after discarding the first `profiling_discard_first_n` warmup samples. Timings are callback execution times measured with monotonic wall-clock timers, not end-to-end message latency.
-
-To aggregate all profiled scans under a bag/result directory:
-
-```bash
-src/scene_graph_ros/scripts/aggregate_runtime_profiles.py \
-  /workspace/occusg_ws/mp3d/results
-```
-
-For a single scan, pass the profiling directory and run name:
-
-```bash
-src/scene_graph_ros/scripts/aggregate_runtime_profiles.py \
-  /workspace/occusg_ws/mp3d/results/<scan_id>/profiling \
-  <scan_id>_region
-```
-
-The aggregator writes these files to the input directory, or to `--output-dir` when provided:
-
-```text
-runtime_summary.json
-runtime_summary.csv
-```
-
-The runtime table has rows for point-cloud generation, 3D occupancy integration, 2D free-space projection, DuDe decomposition, region tracking, entity assignment and graph assembly, and total per update. Rows whose stages are not present in the discovered profiling files are left empty with notes.
+Evaluation and profiling utilities remain under `src/scene_graph_ros/scripts/`.
+Use each script's `--help` output for its current standalone command-line API.

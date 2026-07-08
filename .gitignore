@@ -44,6 +44,11 @@ qtcreator-*
 
 *~
 
+# Local Python inference environments and caches
+.venv/
+.cache/
+.pytest_cache/
+
 # Emacs
 .#*
 
@@ -57,3 +62,8 @@ CATKIN_IGNORE
 # Keep the models directory as a placeholder, but ignore bag data inside it.
 /models/*
 !/models/.gitkeep
+
+# Colcon / ROS 2 build artifacts
+/build/
+/install/
+/log/

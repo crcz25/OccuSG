@@ -44,8 +44,9 @@ if [[ -d "${PROJECT_WS}/src" ]]; then
     log "WARN: rosdep failed; continuing so the container stays available"
   fi
 
-  log "building workspace ${PROJECT_WS} with verbose compiler output"
-  if ! PROJECT_WS="${PROJECT_WS}" bash -lc "${ROS_SETUP_CMD} && cd \"\${PROJECT_WS}\" && colcon build --symlink-install --event-handlers console_direct+ --cmake-args -DONNXRUNTIME_USE_GPU=${USE_GPU:-ON} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_VERBOSE_MAKEFILE=ON"; then
+  log "building workspace ${PROJECT_WS} with its venv-aware build script"
+  if ! SKIP_ROSDEP=1 VENV_PATH="${VENV_PATH:-/home/${USERNAME}/venv}" \
+      "${PROJECT_WS}/scripts/build_workspace.sh" --event-handlers console_direct+; then
     log "ERROR: workspace build failed; continuing so the container stays available for debugging"
   fi
 

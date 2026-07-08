@@ -5,7 +5,6 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 ARG WORKSPACE_DIR="/workspace"
 ARG ROS_DISTRO="humble"
-ARG USE_GPU="ON"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Etc/UTC \
@@ -14,11 +13,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     USERNAME=${USERNAME} \
     WORKSPACE_DIR=${WORKSPACE_DIR} \
     ROS_DISTRO=${ROS_DISTRO} \
-    USE_GPU=${USE_GPU} \
-    VENV_PATH=/opt/venv \
+    VENV_PATH=/home/${USERNAME}/venv \
     USE_CUDA=1 \
     CUDA_HOME=/usr/local/cuda \
-    PATH=/opt/venv/bin:$PATH \
+    PATH=/home/${USERNAME}/venv/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64 \
     CMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu/cmake/pcl
 
@@ -83,28 +81,6 @@ RUN apt-get update \
     dh-python \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN wget -q -L -O  /tmp/onnxruntime-gpu.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-gpu-1.19.2.tgz  \
-    && tar -zxvf /tmp/onnxruntime-gpu.tgz -C /opt/ \
-    && rm /tmp/onnxruntime-gpu.tgz \
-    && echo "/opt/onnxruntime-linux-x64-gpu-1.19.2/lib" >> /etc/ld.so.conf.d/onnxruntime.conf \
-    && ldconfig
-
-RUN wget -q -L -O  /tmp/onnxruntime-cpu.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz  \
-    && tar -zxvf /tmp/onnxruntime-cpu.tgz -C /opt/ \
-    && rm /tmp/onnxruntime-cpu.tgz \
-    && echo "/opt/onnxruntime-linux-x64-1.19.2/lib" >> /etc/ld.so.conf.d/onnxruntime.conf \
-    && ldconfig
-
-RUN case "${USE_GPU}" in \
-        ON|on|1|true|TRUE|True) \
-          ln -sfn /opt/onnxruntime-linux-x64-gpu-1.19.2 /opt/onnxruntime-current ;; \
-        OFF|off|0|false|FALSE|False) \
-          ln -sfn /opt/onnxruntime-linux-x64-1.19.2 /opt/onnxruntime-current ;; \
-        *) \
-          echo "Invalid USE_GPU='${USE_GPU}'. Expected ON or OFF." >&2; exit 1 ;; \
-    esac
-ENV PATH=/opt/onnxruntime-current/bin:$PATH
-
 # Check if "ubuntu" user exists, delete it if it does, then create the desired user
 RUN if getent passwd ubuntu > /dev/null 2>&1; then \
     userdel -r ubuntu && \
@@ -129,33 +105,35 @@ RUN mkdir -p ${WORKSPACE_DIR} \
     && mkdir -p ${WORKSPACE_DIR}/occusg_ws/src \
     && chown -R ${USERNAME}:${USERNAME} ${WORKSPACE_DIR}
 
+# Keep the standalone inference lockfile in the image. The source workspace is
+# mounted later during development, but environment creation must be reproducible
+# during docker build without relying on that mount.
+COPY --chown=${USERNAME}:${USERNAME} src/semantic_perception/requirements.txt /tmp/semantic_perception-requirements.txt
+
 USER $USERNAME
 WORKDIR ${WORKSPACE_DIR}
 
-# Install ONNX Runtime
+# Create the isolated Python environment used by inference and ROS Python code.
 RUN source /opt/ros/$ROS_DISTRO/setup.bash \
     && python3 -m venv --system-site-packages --symlinks /home/${USERNAME}/venv \
-    && /home/${USERNAME}/venv/bin/python -m pip install --upgrade pip setuptools==70.3.0 wheel certifi
+    && /home/${USERNAME}/venv/bin/python -m pip install --upgrade \
+       pip==25.0.1 setuptools==75.8.0 wheel==0.45.1 packaging==26.2 certifi==2026.6.17
 
+# Install CUDA PyTorch before GroundingDINO because its build script imports
+# torch. CUDA_VISIBLE_DEVICES is empty only for package installation: this
+# runtime image has no nvcc, and inference uses the upstream torch fallback.
 RUN /home/${USERNAME}/venv/bin/pip install --no-cache-dir \
-    scikit-learn \
-    onnxruntime-gpu \
-    pandas \
-    openpyxl \
-    transforms3d \
-    'opencv-contrib-python==4.11.0.86' \
-    'opencv-python== 4.11.0.86' \
-    'tensorrt==10.12.0.36'
-RUN /home/${USERNAME}/venv/bin/pip install --upgrade scipy
-
-RUN /home/${USERNAME}/venv/bin/pip install --no-cache-dir torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    torch==2.6.0 torchvision==0.21.0 \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    && CUDA_VISIBLE_DEVICES="" /home/${USERNAME}/venv/bin/pip install \
+       --no-build-isolation --no-cache-dir -r /tmp/semantic_perception-requirements.txt \
+    && /home/${USERNAME}/venv/bin/pip check
 
 # Set up bashrc
 RUN echo "alias src_ros='source /opt/ros/$ROS_DISTRO/setup.bash'" >> /home/${USERNAME}/.bashrc
 RUN echo "export WORKSPACE_DIR=${WORKSPACE_DIR}" >> /home/${USERNAME}/.bashrc
 RUN echo "export CUDA_HOME=/usr/local/cuda" >> /home/${USERNAME}/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH" >> /home/${USERNAME}/.bashrc
-RUN echo "export LD_LIBRARY_PATH=/home/${USERNAME}/venv/lib/python3.10/site-packages/tensorrt_libs:$LD_LIBRARY_PATH" >> /home/${USERNAME}/.bashrc
 
 USER root
 ENV SDL_AUDIODRIVER=dummy GAZEBO_AUDIO_DEVICE=none
