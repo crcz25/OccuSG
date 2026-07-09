@@ -13,11 +13,11 @@ from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
-from semantic_perception_msgs.msg import ObjectProposal3D, ObjectProposal3DArray
 
 from semantic_perception.debug_image import render_debug_image
 from semantic_perception.inference.crop_embeddings import validate_fusion_weights
 from semantic_perception.worker import Frame, FrameResult, WorkerPool
+from semantic_perception_msgs.msg import ObjectProposal3D, ObjectProposal3DArray
 
 
 class SemanticPerceptionNode(Node):
@@ -51,7 +51,10 @@ class SemanticPerceptionNode(Node):
             self, Image, str(config["depth_topic"]), qos_profile=qos_profile_sensor_data
         )
         self._info_sub = Subscriber(
-            self, CameraInfo, str(config["camera_info_topic"]), qos_profile=qos_profile_sensor_data
+            self,
+            CameraInfo,
+            str(config["camera_info_topic"]),
+            qos_profile=qos_profile_sensor_data,
         )
         self._synchronizer = ApproximateTimeSynchronizer(
             [self._rgb_sub, self._depth_sub, self._info_sub],
@@ -79,14 +82,14 @@ class SemanticPerceptionNode(Node):
             "publish_debug_image": False,
             "debug_image_topic": "/semantic_perception/debug_image",
             "debug_mask_alpha": 0.45,
-            "prompt_csv_path": "models/HM3D_CountsOfObjectTypes.csv",
+            "prompt_csv_path": "models/labels/HM3D_CountsOfObjectTypes.csv",
             "class_embedding_cache_path": "models/hm3d_openclip_embedding_cache.bin",
             "openclip_model": "ViT-H-14",
             "openclip_checkpoint_path": "models/laion2b_s32b_b79k.bin",
             "text_embedding_batch_size": 64,
-            "groundingdino_config_path": "models/GroundingDINO_SwinT_OGC.py",
-            "groundingdino_model": "models/groundingdino_swint_ogc.pth",
-            "sam_model": "models/mobile_sam.pt",
+            "groundingdino_config_path": "models/groundingdino/GroundingDINO_SwinT_OGC.py",
+            "groundingdino_model": "models/groundingdino/groundingdino_swint_ogc.pth",
+            "sam_model": "models/mobilesam/mobile_sam.pt",
             "sam_model_type": "vit_t",
             "groundingdino_prompt": "object",
             "device": "cuda",
@@ -117,7 +120,9 @@ class SemanticPerceptionNode(Node):
             "groundingdino_model",
             "sam_model",
         ):
-            config[key] = self._resolve_path(str(config[key]), key == "class_embedding_cache_path")
+            config[key] = self._resolve_path(
+                str(config[key]), key == "class_embedding_cache_path"
+            )
         return config
 
     @staticmethod
@@ -155,8 +160,13 @@ class SemanticPerceptionNode(Node):
             raise ValueError("text_embedding_batch_size must be positive")
         if not 0.0 <= float(config["debug_mask_alpha"]) <= 1.0:
             raise ValueError("debug_mask_alpha must be between 0 and 1")
-        if int(config["sync_queue_size"]) <= 0 or float(config["sync_slop_seconds"]) < 0.0:
-            raise ValueError("Synchronization queue size must be positive and slop non-negative")
+        if (
+            int(config["sync_queue_size"]) <= 0
+            or float(config["sync_slop_seconds"]) < 0.0
+        ):
+            raise ValueError(
+                "Synchronization queue size must be positive and slop non-negative"
+            )
 
     def _synchronized_callback(
         self, rgb_message: Image, depth_message: Image, camera_info: CameraInfo
@@ -168,13 +178,22 @@ class SemanticPerceptionNode(Node):
                 dtype=np.uint8,
             )
             raw_depth = np.asarray(
-                self._bridge.imgmsg_to_cv2(depth_message, desired_encoding="passthrough")
+                self._bridge.imgmsg_to_cv2(
+                    depth_message, desired_encoding="passthrough"
+                )
             )
             depth = self._depth_in_metres(raw_depth, depth_message.encoding)
         except (CvBridgeError, ValueError, TypeError) as exc:
-            self.get_logger().warning(f"Discarded frame with invalid image encoding: {exc}")
+            self.get_logger().warning(
+                f"Discarded frame with invalid image encoding: {exc}"
+            )
             return
-        fx, fy, cx, cy = camera_info.k[0], camera_info.k[4], camera_info.k[2], camera_info.k[5]
+        fx, fy, cx, cy = (
+            camera_info.k[0],
+            camera_info.k[4],
+            camera_info.k[2],
+            camera_info.k[5],
+        )
         if fx <= 0.0 or fy <= 0.0:
             self.get_logger().warning(
                 "CameraInfo is uncalibrated; proposals will have invalid 3D data"
@@ -198,13 +217,17 @@ class SemanticPerceptionNode(Node):
     @staticmethod
     def _depth_in_metres(depth: np.ndarray, encoding: str) -> np.ndarray:
         if depth.ndim != 2:
-            raise ValueError(f"Depth image must be single-channel, got shape {depth.shape}")
+            raise ValueError(
+                f"Depth image must be single-channel, got shape {depth.shape}"
+            )
         normalized = encoding.upper()
         if normalized in ("16UC1", "MONO16"):
             return depth.astype(np.float32) * 0.001
         if normalized == "32FC1":
             return depth.astype(np.float32, copy=False)
-        raise ValueError(f"Unsupported depth encoding '{encoding}'; expected 16UC1 or 32FC1")
+        raise ValueError(
+            f"Unsupported depth encoding '{encoding}'; expected 16UC1 or 32FC1"
+        )
 
     def _publish_ready_results(self) -> None:
         while True:
@@ -249,7 +272,9 @@ class SemanticPerceptionNode(Node):
             if proposal.geometry.valid:
                 centroid = proposal.geometry.centroid
                 minimum, maximum = proposal.geometry.minimum, proposal.geometry.maximum
-                item.centroid_3d.x, item.centroid_3d.y, item.centroid_3d.z = map(float, centroid)
+                item.centroid_3d.x, item.centroid_3d.y, item.centroid_3d.z = map(
+                    float, centroid
+                )
                 center = (minimum + maximum) * 0.5
                 size = maximum - minimum
                 item.bbox_3d.center.position.x = float(center[0])

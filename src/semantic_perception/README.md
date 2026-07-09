@@ -109,11 +109,14 @@ directory:
 
 ```text
 models/
-  GroundingDINO_SwinT_OGC.py
-  groundingdino_swint_ogc.pth
-  mobile_sam.pt
+  groundingdino/
+    GroundingDINO_SwinT_OGC.py
+    groundingdino_swint_ogc.pth
+  mobilesam/
+    mobile_sam.pt
+  labels/
+    HM3D_CountsOfObjectTypes.csv
   laion2b_s32b_b79k.bin
-  HM3D_CountsOfObjectTypes.csv
 ```
 
 `hm3d_openclip_embedding_cache.bin` is generated automatically in the same
@@ -184,10 +187,10 @@ part of this package.
 | `openclip_model` | `ViT-H-14` | OpenCLIP architecture. |
 | `openclip_checkpoint_path` | `models/laion2b_s32b_b79k.bin` | OpenCLIP checkpoint. |
 | `text_embedding_batch_size` | `64` | Prompt-cache generation batch size. |
-| `groundingdino_config_path` | model path | GroundingDINO configuration. |
-| `groundingdino_model` | model path | GroundingDINO weights. |
+| `groundingdino_config_path` | `models/groundingdino/GroundingDINO_SwinT_OGC.py` | GroundingDINO configuration. |
+| `groundingdino_model` | `models/groundingdino/groundingdino_swint_ogc.pth` | GroundingDINO weights. |
 | `groundingdino_prompt` | `object` | Class-agnostic detector prompt. |
-| `sam_model` | `models/mobile_sam.pt` | MobileSAM weights. |
+| `sam_model` | `models/mobilesam/mobile_sam.pt` | MobileSAM weights. |
 | `sam_model_type` | `vit_t` | MobileSAM registry key. |
 | `devices` | `['cuda:0', 'cuda:1']` | Worker-device assignment. |
 | `device` | `cuda` | Fallback when `devices` is empty. |

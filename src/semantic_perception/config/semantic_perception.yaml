@@ -18,7 +18,7 @@ semantic_perception:
 
     # Vocabulary CSV used to build the cached OpenCLIP text embeddings (one label per row,
     # or an HM3D "label;count" table).
-    prompt_csv_path: "models/HM3D_CountsOfObjectTypes.csv"
+    prompt_csv_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
     # Binary cache of OpenCLIP text embeddings for prompt_csv_path; regenerated automatically
     # whenever it is missing or the vocabulary/model no longer matches it.
     class_embedding_cache_path: "models/hm3d_openclip_embedding_cache.bin"
@@ -33,11 +33,11 @@ semantic_perception:
     # Number of prompts encoded per OpenCLIP text-encoder batch when building the vocabulary cache.
     text_embedding_batch_size: 64
     # Path to the GroundingDINO model config (Python file describing the detector architecture).
-    groundingdino_config_path: "models/GroundingDINO_SwinT_OGC.py"
+    groundingdino_config_path: "models/groundingdino/GroundingDINO_SwinT_OGC.py"
     # Path to the GroundingDINO detector checkpoint weights.
-    groundingdino_model: "models/groundingdino_swint_ogc.pth"
+    groundingdino_model: "models/groundingdino/groundingdino_swint_ogc.pth"
     # Path to the SAM / MobileSAM segmentation checkpoint weights.
-    sam_model: "models/mobile_sam.pt"
+    sam_model: "models/mobilesam/mobile_sam.pt"
     # SAM model registry key matching sam_model (e.g. "vit_t" for MobileSAM's tiny ViT).
     sam_model_type: "vit_t"
 
