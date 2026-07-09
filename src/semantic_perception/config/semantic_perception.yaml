@@ -21,7 +21,7 @@ semantic_perception:
     prompt_csv_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
     # Binary cache of OpenCLIP text embeddings for prompt_csv_path; regenerated automatically
     # whenever it is missing or the vocabulary/model no longer matches it.
-    class_embedding_cache_path: "models/hm3d_openclip_embedding_cache.bin"
+    class_embedding_cache_path: "models/labels/hm3d_openclip_embedding_cache.bin"
 
     # OpenCLIP architecture plus an optional local checkpoint. The checkpoint may
     # also be an OpenCLIP pretrained tag (for example, "laion2b_s32b_b79k").
