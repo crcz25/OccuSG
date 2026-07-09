@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS occusg
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS occusg
 
 ARG USERNAME="devuser"
 ARG USER_UID=1000
@@ -120,13 +120,17 @@ RUN source /opt/ros/$ROS_DISTRO/setup.bash \
        pip==25.0.1 setuptools==75.8.0 wheel==0.45.1 packaging==26.2 certifi==2026.6.17
 
 # Install CUDA PyTorch before GroundingDINO because its build script imports
-# torch. CUDA_VISIBLE_DEVICES is empty only for package installation: this
-# runtime image has no nvcc, and inference uses the upstream torch fallback.
+# torch. No GPU is visible during docker build, so TORCH_CUDA_ARCH_LIST makes
+# GroundingDINO compile its _C deformable-attention CUDA extension anyway
+# (8.6 = RTX 3090; +PTX lets newer GPUs JIT-compile it). The import check
+# fails the image build if the extension silently did not compile.
 RUN /home/${USERNAME}/venv/bin/pip install --no-cache-dir \
     torch==2.6.0 torchvision==0.21.0 \
     --index-url https://download.pytorch.org/whl/cu124 \
-    && CUDA_VISIBLE_DEVICES="" /home/${USERNAME}/venv/bin/pip install \
+    && CUDA_VISIBLE_DEVICES="" TORCH_CUDA_ARCH_LIST="8.6+PTX" \
+       /home/${USERNAME}/venv/bin/pip install \
        --no-build-isolation --no-cache-dir -r /tmp/semantic_perception-requirements.txt \
+    && /home/${USERNAME}/venv/bin/python -c "import groundingdino._C; print('groundingdino._C OK')" \
     && /home/${USERNAME}/venv/bin/pip check
 
 # Set up bashrc
