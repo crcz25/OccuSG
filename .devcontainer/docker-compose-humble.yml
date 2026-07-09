@@ -6,8 +6,8 @@ services:
       target: occusg
       args:
         USERNAME: devuser
-        USER_UID: 1000
-        USER_GID: 1000
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
     image: occusg:latest
     restart: "no"
 
@@ -23,7 +23,6 @@ services:
 
     volumes:
       - ..:/workspace/occusg_ws:cached
-      - ${HOME}/.Xauthority:/home/devuser/.Xauthority:rw
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /dev/dri:/dev/dri
       - /dev/snd:/dev/snd

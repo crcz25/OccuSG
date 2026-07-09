@@ -5,7 +5,7 @@
     ],
     "service": "dev",
     "workspaceFolder": "/workspace/occusg_ws",
-    "updateRemoteUserUID": false,
+    "updateRemoteUserUID": true,
     "shutdownAction": "stopCompose",
     "customizations": {
       "vscode": {
