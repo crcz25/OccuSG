@@ -21,6 +21,25 @@ def test_batches_and_normalizes_all_embedding_types():
         assert np.linalg.norm(item.fused_embedding) == pytest.approx(1.0)
 
 
+def test_encoder_failure_propagates_unmodified():
+    """No fatal/recoverable classification: every encoder failure propagates as-is."""
+    rgb = np.full((8, 8, 3), 127, dtype=np.uint8)
+    boxes = [[0, 0, 4, 4]]
+    masks = [np.ones((8, 8), dtype=bool)]
+    warnings = []
+
+    calls = []
+
+    def fail(crops):
+        calls.append(len(crops))
+        raise RuntimeError("CUDA error: unspecified launch failure")
+
+    with pytest.raises(RuntimeError, match="unspecified launch failure"):
+        encode_object_crops(rgb, boxes, masks, fail, 0.5, 0.5, warnings.append)
+    assert calls == [1]
+    assert warnings == []
+
+
 def test_fusion_falls_back_and_rejects_bad_weights():
     vector = np.array([3.0, 4.0], dtype=np.float32)
     np.testing.assert_allclose(fuse_embeddings(vector, None, 0.5, 0.5), [0.6, 0.8])

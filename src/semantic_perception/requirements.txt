@@ -2,8 +2,10 @@
 # PyTorch's cu124 wheel is ABI-compatible with the CUDA 12.4.1 runtime image.
 --extra-index-url https://download.pytorch.org/whl/cu124
 
-torch==2.6.0
-torchvision==0.21.0
+# GroundingDINO's pinned CUDA extension still passes Tensor.type() to PyTorch's
+# dispatch macros. PyTorch 2.6 removed that compatibility overload.
+torch==2.5.1
+torchvision==0.20.1
 numpy==1.26.4
 scipy==1.15.2
 Pillow==11.1.0

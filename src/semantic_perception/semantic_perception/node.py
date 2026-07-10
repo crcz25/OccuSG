@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import time
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge, CvBridgeError
 from message_filters import ApproximateTimeSynchronizer, Subscriber
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
@@ -38,10 +40,15 @@ class SemanticPerceptionNode(Node):
             self._debug_publisher = self.create_publisher(
                 Image, str(config["debug_image_topic"]), 1
             )
+        self._shutdown_on_worker_failure = bool(
+            config["shutdown_when_all_workers_failed"]
+        )
+        self._shutdown_initiated = False
         self._workers = WorkerPool(
             config,
             lambda message: self.get_logger().warning(message),
             lambda message: self.get_logger().info(message),
+            self._log_error,
         )
 
         self._rgb_sub = Subscriber(
@@ -64,6 +71,10 @@ class SemanticPerceptionNode(Node):
         )
         self._synchronizer.registerCallback(self._synchronized_callback)
         self._result_timer = self.create_timer(0.01, self._publish_ready_results)
+        self._stats_timer = None
+        stats_interval = float(config["stats_report_interval_sec"])
+        if stats_interval > 0.0:
+            self._stats_timer = self.create_timer(stats_interval, self._report_statistics)
         self.get_logger().info(
             f"Listening for synchronized RGB-D frames on {config['rgb_topic']} and "
             f"{config['depth_topic']}"
@@ -96,7 +107,12 @@ class SemanticPerceptionNode(Node):
             "devices": ["cuda:0", "cuda:1"],
             "num_worker_threads": 2,
             "frame_queue_size": 4,
+            "drop_report_every": 30,
             "result_queue_size": 8,
+            "drop_stale_results": True,
+            "shutdown_when_all_workers_failed": True,
+            "gpu_memory_budget_gb": 0.0,
+            "stats_report_interval_sec": 10.0,
             "detection_threshold": 0.35,
             "text_threshold": 0.25,
             "bbox_embedding_weight": 0.5,
@@ -167,6 +183,12 @@ class SemanticPerceptionNode(Node):
             raise ValueError(
                 "Synchronization queue size must be positive and slop non-negative"
             )
+        if int(config["drop_report_every"]) <= 0:
+            raise ValueError("drop_report_every must be positive")
+        if float(config["gpu_memory_budget_gb"]) < 0.0:
+            raise ValueError("gpu_memory_budget_gb must be 0 (unlimited) or positive")
+        if float(config["stats_report_interval_sec"]) < 0.0:
+            raise ValueError("stats_report_interval_sec must be 0 (disabled) or positive")
 
     def _synchronized_callback(
         self, rgb_message: Image, depth_message: Image, camera_info: CameraInfo
@@ -211,6 +233,7 @@ class SemanticPerceptionNode(Node):
             rgb=np.ascontiguousarray(rgb),
             depth_m=np.ascontiguousarray(depth),
             intrinsics=(float(fx), float(fy), float(cx), float(cy)),
+            received_monotonic=time.monotonic(),
         )
         self._workers.submit(frame)
 
@@ -233,19 +256,40 @@ class SemanticPerceptionNode(Node):
         while True:
             result = self._workers.get_result()
             if result is None:
-                return
+                break
             self._publish_result(result)
+        self._check_worker_health()
+
+    def _check_worker_health(self) -> None:
+        """Shut down once every inference worker thread has stopped running."""
+        if (
+            not self._shutdown_on_worker_failure
+            or self._shutdown_initiated
+            or not self._workers.all_workers_failed()
+        ):
+            return
+        self._shutdown_initiated = True
+        self.get_logger().error(
+            "All inference workers have stopped; shutting the node down so a "
+            "supervisor can restart it."
+        )
+        rclpy.try_shutdown()
+
+    def _log_error(self, message: str) -> None:
+        self.get_logger().error(message)
+
+    def _report_statistics(self) -> None:
+        info, warning = self._workers.stats_report()
+        if info:
+            self.get_logger().info(info)
+        if warning:
+            self.get_logger().warning(warning)
 
     def _publish_result(self, result: FrameResult) -> None:
         message = ObjectProposal3DArray()
         message.header.stamp.sec = result.frame.stamp_sec
         message.header.stamp.nanosec = result.frame.stamp_nanosec
         message.header.frame_id = result.frame.frame_id
-        if result.error:
-            self.get_logger().warning(
-                f"Publishing empty proposal array for failed frame "
-                f"{result.frame.sequence}: {result.error}"
-            )
         for identifier, proposal in enumerate(result.proposals):
             item = ObjectProposal3D()
             item.id = identifier
@@ -327,6 +371,3 @@ def main(args=None) -> None:
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
-
-from rclpy.executors import ExternalShutdownException  # noqa: E402

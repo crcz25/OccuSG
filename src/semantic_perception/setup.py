@@ -20,7 +20,6 @@ setup(
     maintainer_email="maintainer@example.com",
     description="Synchronized RGB-D proposals with CLIP visual embeddings.",
     license="Apache-2.0",
-    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "semantic_perception_node = semantic_perception.node:main",

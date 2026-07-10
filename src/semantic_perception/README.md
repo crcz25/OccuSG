@@ -27,7 +27,7 @@ Install these through apt/rosdep:
 
 Install these only in the Python venv from `requirements.txt`:
 
-- PyTorch 2.6.0 and torchvision 0.21.0 CUDA 12.4 wheels;
+- PyTorch 2.5.1 and torchvision 0.20.1 CUDA 12.4 wheels;
 - OpenCLIP 2.32.0;
 - pinned GroundingDINO and MobileSAM Git revisions;
 - Transformers, timm, NumPy, SciPy, Pillow, OpenCV wheels, supervision, and
@@ -192,11 +192,14 @@ part of this package.
 | `groundingdino_prompt` | `object` | Class-agnostic detector prompt. |
 | `sam_model` | `models/mobilesam/mobile_sam.pt` | MobileSAM weights. |
 | `sam_model_type` | `vit_t` | MobileSAM registry key. |
-| `devices` | `['cuda:0', 'cuda:1']` | Worker-device assignment. |
+| `devices` | `['cuda:0', 'cuda:1']` | Worker-device assignment (worker `i` uses `devices[i % len]`). |
 | `device` | `cuda` | Fallback when `devices` is empty. |
-| `num_worker_threads` | `2` | Number of independently loaded model bundles. |
-| `frame_queue_size` | `4` | Per-worker bounded input queue. |
+| `num_worker_threads` | `2` | Independently loaded model bundles; `0` = one per device (recommended). |
+| `frame_queue_size` | `4` | Shared bounded input queue; overflow drops the oldest frame, `1` = latest-frame-only. |
 | `result_queue_size` | `8` | Bounded result queue. |
+| `drop_stale_results` | `true` | Publish results in monotonic frame order, dropping late out-of-order ones. |
+| `gpu_memory_budget_gb` | `0.0` (`22.0` in the checked-in YAML) | Per-GPU memory cap for this process; `0` = unlimited. Clamped to currently-free VRAM minus 1 GiB when the GPU is shared (e.g. with a display server). CUDA only; other backends warn and continue. |
+| `stats_report_interval_sec` | `10.0` | Runtime diagnostics period (rates, queue depth, stage timings, drops, VRAM); `0` disables. |
 | `detection_threshold` | `0.35` | GroundingDINO box threshold. |
 | `text_threshold` | `0.25` | GroundingDINO text threshold. |
 | `bbox_embedding_weight` | `0.5` | Fused embedding bbox weight. |
@@ -297,9 +300,13 @@ requirements and places it on `PATH`. The workspace entrypoint invokes the root
 venv-aware build script. Inside the container, use the same build, test, and
 runtime commands shown above.
 
-GroundingDINO's optional custom CUDA extension is not built in the CUDA runtime
-image because it has no nvcc. The adapter selects GroundingDINO's upstream
-PyTorch deformable-attention implementation instead.
+The devcontainer uses the CUDA *devel* image, whose nvcc compiles
+GroundingDINO's custom `_C` deformable-attention CUDA extension during the
+image build (`TORCH_CUDA_ARCH_LIST="8.6+PTX"` covers the RTX 3090 without a
+GPU being visible to `docker build`). The compiled kernel is both faster and
+much flatter in VRAM than the fallback. On images without nvcc the install
+still succeeds and the adapter selects GroundingDINO's upstream PyTorch
+deformable-attention implementation instead, with a startup warning.
 
 ## Troubleshooting
 
@@ -326,3 +333,88 @@ the node reaches `Inference models ready` and begins publishing results.
 This package does not use ONNX Runtime, TensorRT, `ONNXRUNTIME_*` CMake flags, or
 a `use_gpu` ROS parameter. Use `device`/`devices` for the ROS node and
 `--device`/`--openclip-device` for the standalone runner.
+
+### `CUDA error: unspecified launch failure` / a GPU disappears from `nvidia-smi`
+
+This error means the CUDA context is dead; it is frequently the *symptom* of a
+driver- or hardware-level event, not an application bug. Diagnose in this order:
+
+1. **Capture the system state immediately** (before and after a test):
+
+   ```bash
+   ./src/semantic_perception/scripts/collect_gpu_diagnostics.sh
+   ```
+
+2. **Check the host kernel log for the FIRST failure.** Application logs show
+   whichever CUDA call happened to observe the dead context first (CLIP,
+   GroundingDINO, ...); the kernel log shows the actual origin:
+
+   ```bash
+   sudo dmesg -T | grep -iE "NVRM|Xid|fallen off|AER"
+   ```
+
+   * `Xid 79: GPU has fallen off the bus` — the GPU dropped off PCIe. This is a
+     power/PCIe/hardware event. **Only a host reboot recovers it**; restarting
+     the node, recreating the CUDA context, or rebuilding the container cannot.
+   * `Xid 154: recovery action ... Node Reboot Required` — the driver has
+     poisoned new CUDA initialization process-wide; reboot the host.
+   * `Xid 13/31/43` with a process name — an application-level illegal access;
+     debug with `CUDA_LAUNCH_BLOCKING=1` and per-stage logs.
+
+3. **Node behaviour on errors.** The node applies no custom CUDA error
+   handling: an exception raised anywhere in a worker's pipeline (detect,
+   segment, embed, geometry) is logged in full — original exception, message,
+   and traceback — via `logger.error(...)`, and that worker's thread then
+   terminates; nothing classifies the error, retries it, or substitutes a
+   generic message. Each worker owns its models on its own GPU, so the
+   remaining workers keep processing independently. When every worker thread
+   has stopped, the node shuts down (parameter
+   `shutdown_when_all_workers_failed`) so a supervisor can restart it.
+
+### Dual-GPU power stability (RTX 3090)
+
+Two RTX 3090s draw 350 W each sustained and transient-spike far above that for
+milliseconds. On marginal PSUs, daisy-chained PCIe power pigtails, or riser
+cables this manifests as Xid 79 under rising inference load. Mitigations, in
+order of effectiveness:
+
+```bash
+# Cap sustained board power (per boot; put in a systemd unit for persistence).
+sudo nvidia-smi -pm 1
+sudo nvidia-smi -pl 280        # 3090 perf loss is small; transient spikes shrink a lot
+```
+
+* Use one dedicated PCIe 8-pin cable per connector (no Y-splitters/pigtails).
+* Prefer direct slot mounting over riser cables; reseat card and power cables.
+* Size the PSU for >= 2x the combined sustained GPU draw (>= 1200 W for two
+  3090s plus CPU).
+* Re-validate with the stress test below while watching kernel logs.
+
+### Stress testing
+
+`scripts/stress_test_worker_pool.py` drives the full pipeline without ROS,
+records per-second GPU telemetry (utilization, VRAM, temperature, power, PCIe
+link) to CSV, snapshots kernel Xid entries before/after, and aborts as soon as
+all workers fail:
+
+```bash
+# Ramp the submission rate: ~rosbag rates 0.1 -> 1.0 for a 9 Hz bag.
+python3 src/semantic_perception/scripts/stress_test_worker_pool.py \
+    --ramp 1,2,4,6,8,9 --step-seconds 60 --telemetry-csv /tmp/gpu_telemetry.csv
+```
+
+Isolation runs for narrowing down a failing component:
+
+```bash
+# One GPU at a time
+python3 ... --devices cuda:0
+python3 ... --devices cuda:1
+# Serialize all kernel launches to expose the first failing operation
+CUDA_LAUNCH_BLOCKING=1 TORCH_SHOW_CPP_STACKTRACES=1 PYTHONFAULTHANDLER=1 python3 ...
+```
+
+`CUDA_LAUNCH_BLOCKING=1` is for debugging only — do not leave it enabled in
+production. Device-side assertions (`TORCH_USE_CUDA_DSA`) are a *compile-time*
+option of PyTorch: setting the environment variable at runtime on a release
+wheel does nothing; you would need a source build of PyTorch with
+`TORCH_USE_CUDA_DSA=1` to get device-side assertion messages.

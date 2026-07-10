@@ -1,11 +1,11 @@
 semantic_perception:
   ros__parameters:
     # ROS topic carrying the input RGB image stream.
-    rgb_topic: "/camera/color/image_raw"
+    rgb_topic: "/rgb"
     # ROS topic carrying the input depth image stream (16UC1 millimetres or 32FC1 metres).
-    depth_topic: "/camera/depth/image_raw"
+    depth_topic: "/depth"
     # ROS topic carrying the camera intrinsics (CameraInfo) used for 2D->3D projection.
-    camera_info_topic: "/camera/color/camera_info"
+    camera_info_topic: "/rgb/camera_info"
     # ROS topic on which ObjectProposal3DArray results are published.
     proposal_topic: "/semantic_perception/object_proposals"
     # Debug image: MobileSAM masks + DINO boxes/scores + best OpenCLIP label.
@@ -26,9 +26,9 @@ semantic_perception:
     # OpenCLIP architecture plus an optional local checkpoint. The checkpoint may
     # also be an OpenCLIP pretrained tag (for example, "laion2b_s32b_b79k").
     # open_clip architecture name used for visual/text embeddings (e.g. "ViT-H-14").
-    openclip_model: "ViT-H-14"
+    openclip_model: "ViT-L-14"
     # Local OpenCLIP checkpoint file, or an open_clip pretrained tag if it contains no path separator.
-    openclip_checkpoint_path: "models/laion2b_s32b_b79k.bin"
+    openclip_checkpoint_path: "models/clip/L_laion2b_s32b_b82k.bin"
     # Smaller batches reduce peak RAM/VRAM while generating the vocabulary cache.
     # Number of prompts encoded per OpenCLIP text-encoder batch when building the vocabulary cache.
     text_embedding_batch_size: 64
@@ -48,14 +48,40 @@ semantic_perception:
 
     # Fallback compute device for any model whose own *_device override is not set.
     device: "cuda"
-    # Pool of devices assigned round-robin, one per worker thread (index i uses devices[i % len]).
+    # Device pool; worker i loads its models on devices[i % len(devices)].
     devices: ["cuda:0", "cuda:1"]
-    # Number of parallel inference worker threads; each thread loads its own full copy of the models.
-    num_worker_threads: 2
-    # Max frames buffered per worker's input queue; a frame is dropped once every worker queue is full.
+    # Number of inference workers, each owning a full copy of the models on its device.
+    # 0 = one worker per configured device (recommended). Values above the device count
+    # make workers share GPUs and multiply GPU memory usage for little extra throughput.
+    num_worker_threads: 0
+    # Max frames buffered in the single input queue shared by all workers. When it is full,
+    # the OLDEST queued frame is dropped so latency stays bounded and the newest data wins;
+    # 1 means latest-frame-only processing.
     frame_queue_size: 4
+    # Report dropped-frame warnings once initially and then every N dropped frames.
+    drop_report_every: 30
     # Max completed results buffered awaiting publish; the oldest unpublished result is discarded once full.
     result_queue_size: 8
+    # Discard results that finish after a newer frame was already published, keeping the
+    # output stream monotonic in time (workers on different GPUs can finish out of order).
+    drop_stale_results: true
+    # Shut the node down once EVERY inference worker thread has stopped (an unhandled
+    # exception terminates a worker thread; nothing in this node classifies or recovers
+    # from it), instead of idling and silently dropping all frames. A single failed
+    # worker only stops its own thread; the remaining GPUs keep processing.
+    shutdown_when_all_workers_failed: true
+    # Per-GPU memory budget for this process, in GiB (0 = unlimited). Enforced through
+    # PyTorch's per-process CUDA memory fraction: exceeding the budget raises a recoverable
+    # out-of-memory error on that frame instead of destabilizing the GPU. If the budget
+    # exceeds the VRAM currently free (e.g. a display server shares the GPU), it is clamped
+    # to the free amount minus 1 GiB headroom, with a warning — otherwise this node could
+    # starve the display server and freeze the machine. Only enforceable on CUDA devices;
+    # other backends log a warning and continue without a hard limit.
+    gpu_memory_budget_gb: 18.0
+    # Log input/processing rates, queue depth, per-stage latency, drop counts, and GPU
+    # memory usage every N seconds (0 disables). Also warns whenever the input rate
+    # exceeds processing capacity.
+    stats_report_interval_sec: 10.0
 
     # GroundingDINO minimum box confidence for a detection to be kept, in [0, 1].
     detection_threshold: 0.35

@@ -104,12 +104,7 @@ def encode_object_crops(
     for index in range(len(boxes)):
         bbox = bbox_vectors.get(index)
         mask = mask_vectors.get(index)
-        try:
-            fused = fuse_embeddings(bbox, mask, bbox_weight, mask_weight)
-        except ValueError as exc:
-            if warning:
-                warning(f"Object {index} has invalid embeddings: {exc}")
-            bbox, mask, fused = None, None, empty
+        fused = fuse_embeddings(bbox, mask, bbox_weight, mask_weight)
         if fused.size == 0 and warning:
             warning(f"Object {index} has no valid visual embedding")
         output.append(
@@ -125,14 +120,9 @@ def encode_object_crops(
 def _run_batch(crops, indices, component, encode_batch, label, warning):
     if not indices:
         return {}
-    try:
-        encoded = np.asarray(
-            encode_batch([crops[index][component] for index in indices]), dtype=np.float32
-        )
-    except Exception as exc:  # Model failures should not discard otherwise valid proposals.
-        if warning:
-            warning(f"CLIP {label} batch failed: {exc}")
-        return {}
+    encoded = np.asarray(
+        encode_batch([crops[index][component] for index in indices]), dtype=np.float32
+    )
     if encoded.ndim != 2 or encoded.shape[0] != len(indices):
         if warning:
             warning(f"CLIP {label} batch returned an invalid shape: {encoded.shape}")
