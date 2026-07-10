@@ -29,7 +29,7 @@ wget -O "$clip_dir/H_laion2b_s32b_b79k.bin" \
   "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/main/open_clip_pytorch_model.bin?download=true"
 
 wget -O "$clip_dir/L_laion2b_s32b_b82k.bin" \
-  "  https://huggingface.co/laion/CLIP-ViT-L-14-laion2B-s32B-b82K/resolve/main/open_clip_pytorch_model.bin"
+  "https://huggingface.co/laion/CLIP-ViT-L-14-laion2B-s32B-b82K/resolve/main/open_clip_pytorch_model.bin"
 
 cp "$groundingdino_dir/groundingdino_swint_ogc.pth" "$models_dir/groundingdino_swint_ogc.pth"
 cp "$groundingdino_dir/GroundingDINO_SwinT_OGC.py" "$models_dir/GroundingDINO_SwinT_OGC.py"

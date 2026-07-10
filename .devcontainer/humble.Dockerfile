@@ -125,12 +125,12 @@ RUN source /opt/ros/$ROS_DISTRO/setup.bash \
 # (8.6 = RTX 3090; +PTX lets newer GPUs JIT-compile it). The import check
 # fails the image build if the extension silently did not compile.
 RUN /home/${USERNAME}/venv/bin/pip install --no-cache-dir \
-    torch==2.6.0 torchvision==0.21.0 \
+    torch==2.5.1 torchvision==0.20.1 \
     --index-url https://download.pytorch.org/whl/cu124 \
     && CUDA_VISIBLE_DEVICES="" TORCH_CUDA_ARCH_LIST="8.6+PTX" \
        /home/${USERNAME}/venv/bin/pip install \
        --no-build-isolation --no-cache-dir -r /tmp/semantic_perception-requirements.txt \
-    && /home/${USERNAME}/venv/bin/python -c "import groundingdino._C; print('groundingdino._C OK')" \
+    && /home/${USERNAME}/venv/bin/python -c "import torch; import groundingdino._C; print('groundingdino._C OK')" \
     && /home/${USERNAME}/venv/bin/pip check
 
 # Set up bashrc
