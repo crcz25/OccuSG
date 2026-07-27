@@ -27,7 +27,8 @@ Install these through apt/rosdep:
 
 Install these only in the Python venv from `requirements.txt`:
 
-- PyTorch 2.5.1 and torchvision 0.20.1 CUDA 12.4 wheels;
+- PyTorch 2.7.1 and torchvision 0.22.1 CUDA 12.8 wheels, with RTX 3090/Ampere
+  (`sm_86`) and RTX 50-series/Blackwell (`sm_120`) support;
 - OpenCLIP 2.32.0;
 - pinned GroundingDINO and MobileSAM Git revisions;
 - Transformers, timm, NumPy, SciPy, Pillow, OpenCV wheels, supervision, and
@@ -58,7 +59,8 @@ source "$PWD/.venv/bin/activate"
 
 The environment script installs CUDA-enabled PyTorch wheels. They run in CPU
 mode on hosts without an available NVIDIA GPU. GPU execution requires a driver
-compatible with CUDA 12.4 applications.
+compatible with CUDA 12.x and the NVIDIA Container Toolkit when running in
+Docker.
 
 ## Build the package
 
@@ -300,13 +302,12 @@ requirements and places it on `PATH`. The workspace entrypoint invokes the root
 venv-aware build script. Inside the container, use the same build, test, and
 runtime commands shown above.
 
-The devcontainer uses the CUDA *devel* image, whose nvcc compiles
-GroundingDINO's custom `_C` deformable-attention CUDA extension during the
-image build (`TORCH_CUDA_ARCH_LIST="8.6+PTX"` covers the RTX 3090 without a
-GPU being visible to `docker build`). The compiled kernel is both faster and
-much flatter in VRAM than the fallback. On images without nvcc the install
-still succeeds and the adapter selects GroundingDINO's upstream PyTorch
-deformable-attention implementation instead, with a startup warning.
+The devcontainer uses the CUDA *devel* image, but intentionally does not compile
+GroundingDINO's custom `_C` deformable-attention extension. The pinned upstream
+extension uses a pre-2.6 PyTorch C++ API; the adapter therefore selects
+GroundingDINO's portable PyTorch deformable-attention implementation, which is
+compatible with the newer CUDA wheel and does not depend on a GPU during the
+image build.
 
 ## Troubleshooting
 

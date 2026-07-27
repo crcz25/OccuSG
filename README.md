@@ -212,7 +212,7 @@ build points to `/usr/bin/python3`, remove only
 ## Docker/devcontainer
 
 The development image is based on
-`nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`. It installs ROS Humble, native
+`nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04`. It installs ROS Humble, native
 build dependencies, and `/home/devuser/venv` from the same pinned semantic
 requirements. The repository is mounted at `/workspace/occusg_ws`.
 
@@ -223,7 +223,9 @@ docker compose -f .devcontainer/docker-compose-humble.yml exec dev bash
 
 The container entrypoint runs the same venv-aware workspace build script. The
 compose file reserves NVIDIA GPUs, so Docker GPU use requires a compatible host
-driver and the NVIDIA Container Toolkit.
+driver and the NVIDIA Container Toolkit. The image uses PyTorch 2.7.1 with the
+CUDA 12.8 wheel, covering RTX 3090/Ampere (`sm_86`) and RTX 50-series/Blackwell
+(`sm_120`) GPUs.
 
 ## ONNX Runtime and GPU selection
 

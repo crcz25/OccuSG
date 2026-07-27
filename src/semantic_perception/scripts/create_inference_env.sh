@@ -10,25 +10,19 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
   pip==25.0.1 setuptools==75.8.0 wheel==0.45.1 packaging==26.2
 
 # Install CUDA PyTorch first. GroundingDINO imports torch from its build script.
+# cu128 is required for Blackwell (sm_120), while retaining RTX 3090 (sm_86).
 "${VENV_PATH}/bin/python" -m pip install --no-cache-dir \
-  torch==2.5.1 torchvision==0.20.1 \
-  --index-url https://download.pytorch.org/whl/cu124
+  torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
 
-# Hide GPUs while building GroundingDINO so the install never depends on one
-# being present. When nvcc is available (CUDA *devel* image or host toolkit),
-# TORCH_CUDA_ARCH_LIST makes GroundingDINO compile its fast _C CUDA extension
-# even without a visible GPU (8.6 = RTX 3090; +PTX covers newer GPUs). Without
-# nvcc the install still succeeds and inference uses the slower torch fallback.
-if command -v nvcc >/dev/null 2>&1; then
-  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6+PTX}"
-fi
-CUDA_VISIBLE_DEVICES="" "${VENV_PATH}/bin/python" -m pip install \
+# GroundingDINO's pinned extension uses a pre-2.6 PyTorch C++ API. Do not
+# request a CUDA extension build; the node uses GroundingDINO's portable
+# deformable-attention implementation when _C is absent.
+env -u TORCH_CUDA_ARCH_LIST CUDA_VISIBLE_DEVICES="" \
+  "${VENV_PATH}/bin/python" -m pip install \
   --no-build-isolation --no-cache-dir -r "${PACKAGE_DIR}/requirements.txt"
 
-if command -v nvcc >/dev/null 2>&1; then
-  "${VENV_PATH}/bin/python" -c "import torch; import groundingdino._C" \
-    || echo "WARNING: groundingdino._C did not compile; inference will use the slower torch fallback" >&2
-fi
+"${VENV_PATH}/bin/python" -c "import torch; from groundingdino.util.inference import Model; assert torch.version.cuda == '12.8', torch.version.cuda; print(f'PyTorch {torch.__version__} CUDA {torch.version.cuda} installed')"
 
 "${VENV_PATH}/bin/python" -m pip check
 echo "Inference environment ready: ${VENV_PATH}"

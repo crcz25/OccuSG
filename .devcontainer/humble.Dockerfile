@@ -1,4 +1,6 @@
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS occusg
+# CUDA 12.8 is the first CUDA wheel line used by PyTorch with Blackwell
+# (sm_120) support while retaining Ampere (sm_86 / RTX 3090) support.
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS occusg
 
 ARG USERNAME="devuser"
 ARG USER_UID=1000
@@ -120,17 +122,17 @@ RUN source /opt/ros/$ROS_DISTRO/setup.bash \
        pip==25.0.1 setuptools==75.8.0 wheel==0.45.1 packaging==26.2 certifi==2026.6.17
 
 # Install CUDA PyTorch before GroundingDINO because its build script imports
-# torch. No GPU is visible during docker build, so TORCH_CUDA_ARCH_LIST makes
-# GroundingDINO compile its _C deformable-attention CUDA extension anyway
-# (8.6 = RTX 3090; +PTX lets newer GPUs JIT-compile it). The import check
-# fails the image build if the extension silently did not compile.
+# torch. PyTorch 2.7.1/cu128 contains native kernels for Ampere and Blackwell.
+# GroundingDINO's pinned extension uses a pre-2.6 PyTorch C++ API, so do not
+# compile it here; the node deliberately selects GroundingDINO's portable
+# deformable-attention implementation when the optional _C module is absent.
 RUN /home/${USERNAME}/venv/bin/pip install --no-cache-dir \
-    torch==2.5.1 torchvision==0.20.1 \
-    --index-url https://download.pytorch.org/whl/cu124 \
-    && CUDA_VISIBLE_DEVICES="" TORCH_CUDA_ARCH_LIST="8.6+PTX" \
+    torch==2.7.1 torchvision==0.22.1 \
+    --index-url https://download.pytorch.org/whl/cu128 \
+    && env -u TORCH_CUDA_ARCH_LIST CUDA_VISIBLE_DEVICES="" \
        /home/${USERNAME}/venv/bin/pip install \
        --no-build-isolation --no-cache-dir -r /tmp/semantic_perception-requirements.txt \
-    && /home/${USERNAME}/venv/bin/python -c "import torch; import groundingdino._C; print('groundingdino._C OK')" \
+    && /home/${USERNAME}/venv/bin/python -c "import torch; from groundingdino.util.inference import Model; assert torch.version.cuda == '12.8', torch.version.cuda; print(f'PyTorch {torch.__version__} CUDA {torch.version.cuda} installed; GPU architecture check runs when the container has a GPU')" \
     && /home/${USERNAME}/venv/bin/pip check
 
 # Set up bashrc
