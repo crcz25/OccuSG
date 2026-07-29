@@ -35,11 +35,12 @@ construction.
 | `semantic_perception_msgs` | `ament_cmake` | RGB-D object-proposal interfaces. |
 | `semantic_perception` | `ament_python` | GroundingDINO, MobileSAM, and OpenCLIP inference. |
 
-The checked-out `src/mapconversion/` and `src/octomap_mapping/` directories are
-empty and are not Colcon packages. The two `scene_graph_ros` pipeline launch
-files still reference `mapconversion` and the former ONNX/YOLO semantic node.
-They are therefore not supported end-to-end entry points in this checkout. The
-standalone semantic pipeline and `semantic_perception.launch.py` are current.
+`src/mapconversion/` and `src/octomap_mapping/` are Git submodules; populate them
+with `git submodule update --init --recursive` before building the full pipeline.
+
+`scene_graph_ros` consumes object perception exclusively through
+`semantic_perception_msgs/ObjectProposal3DArray` published by
+`semantic_perception`. There is no other object-detection path in the workspace.
 
 ## Dependency model
 
@@ -233,15 +234,16 @@ The current source tree has no ONNX Runtime consumer and no CMake target reads
 `ONNXRUNTIME_DIR` or `ONNXRUNTIME_USE_GPU`. Those dependencies and build flags
 were removed from the documented and container build process.
 
-The `model_file`, `class_file`, and `use_gpu` keys that remain in
-`scene_graph_ros/config/scene_graph_pipeline_params*.yaml` belong to the former
-YOLO/ONNX node. The current `semantic_perception` node does not declare or read
-them. Do not pass `use_gpu` to the current node.
+The former YOLO/ONNX `semantic_node` parameter block (`model_file`, `class_file`,
+`use_gpu`, `conf_thresh`, `iou_thresh`, `cluster_*`) has been removed from
+`scene_graph_ros/config/scene_graph_pipeline_params*.yaml`. Those files now carry
+a `semantic_perception:` block instead. Do not pass `use_gpu` to the current node.
 
 Current device selection is:
 
-- ROS node: `device` and `devices` parameters in
-  `src/semantic_perception/config/semantic_perception.yaml`;
+- ROS node: `device` and `devices` parameters in the `semantic_perception:` block
+  of `src/semantic_perception/config/semantic_perception.yaml` or of the
+  `scene_graph_ros` pipeline parameter files;
 - standalone runner: `--device` and `--openclip-device`;
 - Docker GPU exposure: NVIDIA Container Toolkit and Compose device reservation.
 
@@ -260,11 +262,42 @@ See [`src/semantic_perception/README.md`](src/semantic_perception/README.md) for
 model names, standalone validation, ROS parameters, rosbag testing, debug images,
 and CPU/GPU guidance.
 
-The launch arguments declared in
-`scene_graph_pipeline_mp3d_bag.launch.py` and
-`scene_graph_pipeline.tbot3.launch.py` still exist syntactically, but those
-launches are not valid end-to-end entry points in the current checkout for the
-reasons described above.
+The full scene-graph pipeline (perception, mapping, region decomposition, and
+graph construction) runs from a recorded MP3D bag with:
+
+```bash
+source /opt/ros/humble/setup.bash
+source "${VENV_PATH:-$HOME/venv}/bin/activate"
+source install/setup.bash
+
+ros2 launch scene_graph_ros scene_graph_pipeline_mp3d_bag.launch.py \
+  bag_path:=$PWD/bags scan_id:=2t7WUuJeko7 use_rviz:=false
+```
+
+The scene graph is exported to `<bag_path>/<scan_id>/scene_graph.json` on
+shutdown. `scene_graph_pipeline.tbot3.launch.py` is the equivalent entry point
+for the TurtleBot3 simulation topics.
+
+### Object association parameters
+
+`scene_graph_region` associates each incoming proposal with an existing OBJECT
+node only when both thresholds are met, and otherwise creates a new node:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `object_proposals_topic` | `/semantic_perception/object_proposals` | `ObjectProposal3DArray` input. |
+| `proposals_qos_*` | `keep_last`/`reliable`/`volatile`/`10` | QoS for that subscription. |
+| `obj_spatial_association_threshold` | `0.75` | Maximum candidate distance, in metres. |
+| `obj_semantic_similarity_threshold` | `0.7` | Minimum cosine similarity between the proposal `fused_embedding` and the node `object_embedding`. |
+| `obj_position_update_policy` | `latest` | `latest` keeps the newest pose; `running_mean` averages associated observations. |
+
+Each OBJECT node keeps `object_embedding` as an online, unit-norm running mean of
+its valid `fused_embedding` observations, alongside `observation_count`
+(associated detections) and `embedding_observation_count` (embeddings folded into
+the mean). The exported JSON uses schema version `1.1`; every OBJECT node carries
+`semantic.object_embedding`, `semantic.room_id`, `semantic.position`,
+`semantic.first_seen`, and the semantic-perception attributes. The legacy
+`detection_score` and `object_id` fields were removed from that schema.
 
 ## Tests
 

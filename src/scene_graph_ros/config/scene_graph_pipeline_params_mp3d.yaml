@@ -5,46 +5,52 @@
 #   ros2 launch scene_graph_ros scene_graph_pipeline_mp3d.launch.py
 # ==============================================================================
 
-semantic_node:
+semantic_perception:
   ros__parameters:
-    model_file: "/workspace/occusg_ws/models/yolo26x-seg.onnx"
-    class_file: "/workspace/occusg_ws/models/coco.names"
-    rgb_topic: "/mp3d/color/image_raw"
-    depth_topic: "/mp3d/depth/image_raw"
-    depth_info_topic: "/mp3d/depth/camera_info"
-    # The MP3D pipeline defaults the loader to camera_frame_policy:=ros_optical.
-    # That keeps depth-image projection, detections, point clouds, and TF in the
-    # same x-right/y-down/z-forward camera convention before transforming to map.
-    target_frame: "map"
-    tf_lookup_timeout_sec: 0.2
-    use_gpu: true
-    rgb_qos_history: "keep_last"
-    rgb_qos_reliability: "reliable"
-    rgb_qos_durability: "volatile"
-    rgb_qos_depth: -1
-    depth_qos_history: "keep_last"
-    depth_qos_reliability: "reliable"
-    depth_qos_durability: "volatile"
-    depth_qos_depth: -1
-    depth_info_qos_history: "keep_last"
-    depth_info_qos_reliability: "reliable"
-    depth_info_qos_durability: "volatile"
-    depth_info_qos_depth: -1
-    ann_img_qos_history: "keep_last"
-    ann_img_qos_reliability: "reliable"
-    ann_img_qos_durability: "volatile"
-    ann_img_qos_depth: -1
-    detections_qos_history: "keep_last"
-    detections_qos_reliability: "reliable"
-    detections_qos_durability: "volatile"
-    detections_qos_depth: -1
-    conf_thresh: 0.70
-    iou_thresh: 0.45
-    cluster_eps: 0.05
-    cluster_min_size: 50.0
-    cluster_max_size: 2500000
-    queue_size: 10
-    sync_max_interval_sec: 0.03
+    # RGB-D input stream consumed by the class-agnostic proposal generator.
+    rgb_topic: "/rgb"
+    depth_topic: "/depth"
+    camera_info_topic: "/rgb/camera_info"
+    # ObjectProposal3DArray consumed by scene_graph_region.
+    proposal_topic: "/semantic_perception/object_proposals"
+    publish_debug_image: true
+    debug_image_topic: "/semantic_perception/debug_image"
+    debug_mask_alpha: 0.45
+
+    # Vocabulary + cached OpenCLIP text embeddings.
+    prompt_csv_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
+    class_embedding_cache_path: "models/labels/hm3d_openclip_embedding_cache.bin"
+    openclip_model: "ViT-L-14"
+    openclip_checkpoint_path: "models/clip/L_laion2b_s32b_b82k.bin"
+    text_embedding_batch_size: 64
+
+    # Detection + segmentation backbones.
+    groundingdino_config_path: "models/groundingdino/GroundingDINO_SwinT_OGC.py"
+    groundingdino_model: "models/groundingdino/groundingdino_swint_ogc.pth"
+    sam_model: "models/mobilesam/mobile_sam.pt"
+    sam_model_type: "vit_t"
+    groundingdino_prompt: "object"
+
+    device: "cuda"
+    devices: ["cuda:0"]
+    num_worker_threads: 0
+    frame_queue_size: 4
+    drop_report_every: 30
+    result_queue_size: 8
+    drop_stale_results: true
+    shutdown_when_all_workers_failed: true
+    gpu_memory_budget_gb: 12.0
+    stats_report_interval_sec: 10.0
+
+    detection_threshold: 0.35
+    text_threshold: 0.25
+    # fused_embedding = bbox_embedding_weight * bbox + masked_embedding_weight * mask.
+    bbox_embedding_weight: 0.5
+    masked_embedding_weight: 0.5
+    sync_queue_size: 10
+    sync_slop_seconds: 0.1
+    min_valid_depth_points: 20
+    max_depth_m: 10.0
 
 point_cloud_generator_node:
   ros__parameters:
@@ -95,7 +101,7 @@ map_conversion_node:
 scene_graph_region:
   ros__parameters:
     odom_topic: "/mp3d/odom"
-    3d_detections_topic: "/semantic_node/detections"
+    object_proposals_topic: "/semantic_perception/object_proposals"
     map_topic: "/mapUAV"
     stable_regions_topic: "/dude/regions"
     fixed_frame_id: "map"
@@ -105,10 +111,10 @@ scene_graph_region:
     odom_qos_durability: "volatile"
     odom_qos_depth: 10
 
-    detections_qos_history: "keep_last"
-    detections_qos_reliability: "reliable"
-    detections_qos_durability: "volatile"
-    detections_qos_depth: 10
+    proposals_qos_history: "keep_last"
+    proposals_qos_reliability: "reliable"
+    proposals_qos_durability: "volatile"
+    proposals_qos_depth: 10
 
     map_qos_history: "keep_last"
     map_qos_reliability: "reliable"
@@ -133,7 +139,12 @@ scene_graph_region:
     pose_time_threshold: 10.0
     pose_window_size: 3
 
-    obj_spatial_merge_threshold: 0.75
+    # Object association: a proposal joins an existing node only when it is
+    # within obj_spatial_association_threshold metres AND its fused_embedding
+    # reaches obj_semantic_similarity_threshold cosine similarity.
+    obj_spatial_association_threshold: 0.75
+    obj_semantic_similarity_threshold: 0.7
+    obj_position_update_policy: "latest"
 
     room_z_offset: 12.0
     region_z_offset: 8.0

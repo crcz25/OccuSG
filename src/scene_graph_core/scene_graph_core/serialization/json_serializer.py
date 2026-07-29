@@ -11,7 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from scene_graph_core.representation import Edge, SceneGraph
+from scene_graph_core.algorithms.semantic import normalize_embedding
+from scene_graph_core.representation import Edge, EdgeType, NodeType, SceneGraph
 
 try:
     import numpy as np
@@ -33,10 +34,27 @@ GEOMETRY_ATTRIBUTE_KEYS = (
 SEMANTIC_ATTRIBUTE_KEYS = (
     "class_name",
     "class_id",
-    "detection_score",
-    "object_id",
+    "detection_confidence",
+    "detector_source",
+    "similarity_score",
+    "entropy_score",
+    "object_embedding",
+    "embedding_observation_count",
+    "observation_count",
+    "last_semantic_similarity",
+    "semantic_perception_id",
+    "valid_3d",
+    "bbox_3d_size",
     "signature_set",
     "object_in_los",
+)
+
+# Attributes written only by the removed detector-based object pipeline.
+OBSOLETE_OBJECT_ATTRIBUTE_KEYS = frozenset(
+    {
+        "detection_score",
+        "object_id",
+    }
 )
 
 PROTECTED_METADATA_KEYS = frozenset(
@@ -52,7 +70,7 @@ PROTECTED_METADATA_KEYS = frozenset(
 class SceneGraphJsonSerializer:
     """Serialize all persisted nodes and edges in a scene graph to JSON."""
 
-    schema_version = "1.0"
+    schema_version = "1.1"
 
     def to_dict(
         self,
@@ -77,7 +95,7 @@ class SceneGraphJsonSerializer:
             ),
         )
 
-        node_entries = [self._node_to_entry(node) for node in nodes]
+        node_entries = [self._node_to_entry(node, graph) for node in nodes]
         edge_entries = [self._edge_to_entry(edge) for edge in edges]
         export_metadata = self._build_metadata(metadata, node_entries, edge_entries)
 
@@ -161,9 +179,13 @@ class SceneGraphJsonSerializer:
             f"got {type(scene_graph)!r}"
         )
 
-    def _node_to_entry(self, node: Any) -> Dict[str, Any]:
-        attributes = self._json_safe(getattr(node, "attributes", None) or {})
-        return {
+    def _node_to_entry(self, node: Any, graph: SceneGraph) -> Dict[str, Any]:
+        attributes = dict(self._json_safe(getattr(node, "attributes", None) or {}))
+        if getattr(node, "node_type", None) == NodeType.OBJECT:
+            for key in OBSOLETE_OBJECT_ATTRIBUTE_KEYS:
+                attributes.pop(key, None)
+
+        entry = {
             "id": self._json_safe(getattr(node, "id", None)),
             "type": self._enum_name(getattr(node, "node_type", None)),
             "layer": self._enum_name(getattr(node, "layer", None)),
@@ -175,6 +197,49 @@ class SceneGraphJsonSerializer:
             "geometry": self._project_attributes(attributes, GEOMETRY_ATTRIBUTE_KEYS),
             "semantic": self._project_attributes(attributes, SEMANTIC_ATTRIBUTE_KEYS),
         }
+
+        if getattr(node, "node_type", None) != NodeType.OBJECT:
+            return entry
+
+        # Object nodes carry the semantic-perception tracking state explicitly so
+        # downstream tooling never has to reach into the raw attribute bag.
+        pose = entry["pose"] or {}
+        embedding = normalize_embedding(attributes.get("object_embedding"))
+        entry["semantic"].update(
+            {
+                "room_id": self._room_id_for_object(node, graph),
+                "position": pose.get("position"),
+                "observation_count": attributes.get("observation_count", 0),
+                "embedding_observation_count": attributes.get(
+                    "embedding_observation_count", 0
+                ),
+                "first_seen": entry["created_at"],
+                "object_embedding": (
+                    embedding.astype(np.float32).tolist()
+                    if embedding is not None
+                    else None
+                ),
+            }
+        )
+        return entry
+
+    def _room_id_for_object(self, node: Any, graph: SceneGraph) -> Optional[int]:
+        """Return the single ROOM_CONTAINS parent room of one object node."""
+        if getattr(node, "id", None) is None:
+            return None
+        room_ids = []
+        try:
+            edges = graph.get_incoming_edges(int(node.id), EdgeType.ROOM_CONTAINS)
+        except KeyError:
+            return None
+        for edge in edges:
+            try:
+                room = graph.get_node(int(edge.source_id))
+            except KeyError:
+                continue
+            if room.node_type == NodeType.ROOM:
+                room_ids.append(int(room.id))
+        return min(room_ids) if room_ids else None
 
     def _edge_to_entry(self, edge: Edge) -> Dict[str, Any]:
         return {

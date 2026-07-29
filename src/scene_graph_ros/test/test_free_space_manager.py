@@ -2,7 +2,7 @@
 """Unit tests for free-space navigation node maintenance."""
 
 from nav_msgs.msg import OccupancyGrid
-from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
+from semantic_perception_msgs.msg import ObjectProposal3D, ObjectProposal3DArray
 
 from scene_graph_core.graph_interface import create_scene_graph_interface
 from scene_graph_core.representation import EdgeType, NodeType, ObjectNode
@@ -106,22 +106,26 @@ def _nav_block_edge_pairs(manager: FreeSpaceNodeManager):
     }
 
 
-def _make_detection_array(x: float, y: float, frame_id: str = "odom") -> Detection3DArray:
-    msg = Detection3DArray()
+def _make_proposal_array(
+    x: float,
+    y: float,
+    frame_id: str = "odom",
+    embedding: tuple = (1.0, 0.0, 0.0),
+) -> ObjectProposal3DArray:
+    msg = ObjectProposal3DArray()
     msg.header.frame_id = frame_id
+    msg.header.stamp.sec = 100
 
-    detection = Detection3D()
-    detection.id = "chair"
-    detection.bbox.center.position.x = x
-    detection.bbox.center.position.y = y
-    detection.bbox.center.orientation.w = 1.0
+    proposal = ObjectProposal3D()
+    proposal.class_name = "chair"
+    proposal.detection_confidence = 0.95
+    proposal.detector_source = "groundingdino"
+    proposal.valid_3d = True
+    proposal.centroid_3d.x = float(x)
+    proposal.centroid_3d.y = float(y)
+    proposal.fused_embedding = [float(value) for value in embedding]
 
-    hypothesis = ObjectHypothesisWithPose()
-    hypothesis.hypothesis.class_id = "chair"
-    hypothesis.hypothesis.score = 0.95
-    detection.results.append(hypothesis)
-
-    msg.detections.append(detection)
+    msg.proposals.append(proposal)
     return msg
 
 
@@ -335,14 +339,15 @@ def test_merged_redetection_does_not_report_new_object_ids_again():
     obj_manager = ObjectNodeManager(
         sg_interface=sg,
         logger=MockLogger(),
-        spatial_merge_threshold=0.75,
+        spatial_association_threshold=0.75,
+        semantic_similarity_threshold=0.7,
         enable_debug_logging=False,
     )
 
     fs_manager.process_occupancy_grid_update(_make_grid([0, 0, 0]), None)
 
     first_stats = obj_manager.process_detections_update(
-        _make_detection_array(1.1, 1.0),
+        _make_proposal_array(1.1, 1.0),
         tf_buffer=None,
         fixed_frame_id="odom",
     )
@@ -354,7 +359,7 @@ def test_merged_redetection_does_not_report_new_object_ids_again():
     first_edge = _single_nearest_edge(sg, first_object_id)
 
     second_stats = obj_manager.process_detections_update(
-        _make_detection_array(1.12, 1.0),
+        _make_proposal_array(1.12, 1.0),
         tf_buffer=None,
         fixed_frame_id="odom",
     )

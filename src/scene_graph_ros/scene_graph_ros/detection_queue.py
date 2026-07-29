@@ -58,7 +58,7 @@ class DetectionInputQueue:
             )
             self._queue.append(queued)
 
-            detections = getattr(msg, "detections", []) or []
+            detections = getattr(msg, "proposals", []) or []
             header = getattr(msg, "header", None)
             stamp = getattr(header, "stamp", None)
             stamp_sec = None

@@ -163,10 +163,28 @@ class SerializationInterface:
                 if isinstance(layer_value, str)
                 else layer_value
             ),
-            attributes=data.get("attributes", {}),
+            attributes=self._object_attributes(data),
             active=data.get("active", True),
         )
         return node
+
+    @staticmethod
+    def _object_attributes(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Load explicit object tracking fields into the canonical attributes."""
+        attributes = dict(data.get("attributes", {}) or {})
+        if str(data.get("type", data.get("node_type", ""))).upper() != "OBJECT":
+            return attributes
+
+        # Tolerate exports whose object tracking state was promoted out of the
+        # attribute bag into top-level node fields.
+        for key in (
+            "object_embedding",
+            "observation_count",
+            "embedding_observation_count",
+        ):
+            if key in data and key not in attributes:
+                attributes[key] = data[key]
+        return attributes
 
     def _edge_from_serialized_dict(self, data: Dict[str, Any]) -> Edge:
         edge_type_value = data.get("type", EdgeType.CUSTOM)

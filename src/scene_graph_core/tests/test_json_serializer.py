@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 import scene_graph_core
 from scene_graph_core.graph_interface import create_scene_graph_interface
@@ -53,7 +54,16 @@ def _make_graph():
         last_seen=21.0,
         attributes={
             "class_name": "chair",
-            "class_id": "56",
+            "class_id": 56,
+            "detection_confidence": np.float32(0.8),
+            "detector_source": "groundingdino",
+            "semantic_perception_id": 3,
+            "valid_3d": True,
+            "observation_count": 5,
+            "embedding_observation_count": 4,
+            "last_semantic_similarity": 0.91,
+            "object_embedding": [3.0, 4.0],
+            # Written only by the removed detector-based pipeline.
             "detection_score": np.float32(0.8),
             "object_id": 42,
         },
@@ -136,7 +146,7 @@ def test_empty_graph_export():
     serializer = SceneGraphJsonSerializer()
     data = serializer.to_dict(create_scene_graph_interface(), metadata={"frame_id": "odom"})
 
-    assert data["schema_version"] == "1.0"
+    assert data["schema_version"] == "1.1"
     assert data["metadata"]["frame_id"] == "odom"
     assert data["metadata"]["num_nodes"] == 0
     assert data["metadata"]["num_edges"] == 0
@@ -189,9 +199,38 @@ def test_full_persisted_graph_export_and_json_safe_values():
     ]
 
     obj_entry = next(node for node in data["nodes"] if node["id"] == ids["obj"])
-    assert obj_entry["semantic"]["class_name"] == "chair"
-    assert math.isclose(obj_entry["semantic"]["detection_score"], 0.8, rel_tol=1e-6)
-    assert obj_entry["semantic"]["object_id"] == 42
+    obj_semantic = obj_entry["semantic"]
+    assert obj_semantic["class_name"] == "chair"
+    assert obj_semantic["class_id"] == 56
+    assert math.isclose(obj_semantic["detection_confidence"], 0.8, rel_tol=1e-6)
+    assert obj_semantic["detector_source"] == "groundingdino"
+    assert obj_semantic["semantic_perception_id"] == 3
+    assert obj_semantic["valid_3d"] is True
+    assert obj_semantic["observation_count"] == 5
+    assert obj_semantic["embedding_observation_count"] == 4
+    assert math.isclose(obj_semantic["last_semantic_similarity"], 0.91, rel_tol=1e-6)
+    assert obj_semantic["room_id"] == ids["room"]
+    assert obj_semantic["first_seen"] == 20.0
+    assert obj_semantic["position"] == obj_entry["pose"]["position"]
+
+    # object_embedding is exported as a unit-norm JSON array of numbers.
+    embedding = obj_semantic["object_embedding"]
+    assert isinstance(embedding, list)
+    assert all(isinstance(value, float) for value in embedding)
+    assert embedding == pytest.approx([0.6, 0.8], abs=1e-6)
+    assert math.isclose(sum(value * value for value in embedding), 1.0, rel_tol=1e-6)
+
+    # Legacy detector-only fields are dropped from the exported schema.
+    assert "detection_score" not in obj_entry["attributes"]
+    assert "detection_score" not in obj_semantic
+    assert "object_id" not in obj_entry["attributes"]
+    assert "object_id" not in obj_semantic
+
+    obj_b_entry = next(node for node in data["nodes"] if node["id"] == ids["obj_b"])
+    assert obj_b_entry["semantic"]["object_embedding"] is None
+    assert obj_b_entry["semantic"]["observation_count"] == 0
+    assert obj_b_entry["semantic"]["embedding_observation_count"] == 0
+    assert obj_b_entry["semantic"]["room_id"] is None
 
     pose_entry = next(node for node in data["nodes"] if node["id"] == ids["pose"])
     assert pose_entry["semantic"]["object_in_los"] == [42, 43]
@@ -263,7 +302,7 @@ def test_scene_graph_interface_serializer_uses_new_export_path(tmp_path):
     sg, _ = _make_graph()
 
     data = sg.serialize.to_dict(metadata={"graph_name": "wrapper"})
-    assert data["schema_version"] == "1.0"
+    assert data["schema_version"] == "1.1"
     assert "type" in data["nodes"][0]
     assert "node_type" not in data["nodes"][0]
     assert data["metadata"]["graph_name"] == "wrapper"
@@ -272,7 +311,61 @@ def test_scene_graph_interface_serializer_uses_new_export_path(tmp_path):
     sg.serialize.save(target, compact=True)
     saved = target.read_text(encoding="utf-8")
     assert "\n" not in saved
-    assert json.loads(saved)["schema_version"] == "1.0"
+    assert json.loads(saved)["schema_version"] == "1.1"
+
+
+def test_object_embedding_round_trips_through_the_interface(tmp_path):
+    sg, ids = _make_graph()
+    target = tmp_path / "graph.json"
+    sg.serialize.save(target)
+
+    reloaded = create_scene_graph_interface()
+    reloaded.serialize.load(str(target))
+
+    obj = reloaded.query.get_node(ids["obj"])
+    # The attribute bag round-trips verbatim; the exported semantic view is the
+    # normalized representation used for cosine comparisons.
+    assert obj.attributes["object_embedding"] == pytest.approx([3.0, 4.0], abs=1e-6)
+    reexported = reloaded.serialize.to_dict()
+    obj_entry = next(node for node in reexported["nodes"] if node["id"] == ids["obj"])
+    assert obj_entry["semantic"]["object_embedding"] == pytest.approx(
+        [0.6, 0.8], abs=1e-6
+    )
+    assert obj.attributes["observation_count"] == 5
+    assert obj.attributes["embedding_observation_count"] == 4
+    assert obj.attributes["class_name"] == "chair"
+    # Obsolete detector-only metadata does not survive the export/import cycle.
+    assert "detection_score" not in obj.attributes
+    assert "object_id" not in obj.attributes
+
+    obj_b = reloaded.query.get_node(ids["obj_b"])
+    assert obj_b.attributes.get("object_embedding") is None
+
+
+def test_object_tracking_fields_load_from_top_level_entries():
+    sg = create_scene_graph_interface()
+    sg.serialize.from_dict(
+        {
+            "nodes": [
+                {
+                    "id": 1000000,
+                    "type": "OBJECT",
+                    "layer": "OBJECT",
+                    "pose": {"position": {"x": 1.0, "y": 0.0, "z": 0.0}},
+                    "attributes": {"class_name": "chair"},
+                    "object_embedding": [0.0, 1.0],
+                    "observation_count": 3,
+                    "embedding_observation_count": 2,
+                }
+            ],
+            "edges": [],
+        }
+    )
+
+    node = sg.query.get_node(1000000)
+    assert node.attributes["object_embedding"] == [0.0, 1.0]
+    assert node.attributes["observation_count"] == 3
+    assert node.attributes["embedding_observation_count"] == 2
 
 
 def test_no_scene_graph_ros_manager_imports_in_core():

@@ -90,22 +90,19 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /intel_realsense_r200_rgb/image_raw
       Value: true
-    - Alpha: 1
-      Class: vision_msgs_rviz_plugins/Detection3DArray
-      ConfigPath: ""
+    - Class: rviz_default_plugins/Image
       Enabled: true
-      Line Width: 0.05000000074505806
-      Name: Detection3DArray
-      Namespaces:
-        {}
-      Only Edge: true
-      Show Score: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SemanticPerceptionDebug
+      Normalize Range: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /semantic_node/detections
+        Value: /semantic_perception/debug_image
       Value: true
     - Alpha: 0.699999988079071
       Class: rviz_default_plugins/Map

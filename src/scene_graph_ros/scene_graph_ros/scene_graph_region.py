@@ -20,8 +20,8 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.time import Time
 from scene_graph_core.graph_interface import create_scene_graph_interface
 from scene_graph_core.representation import NodeType
+from semantic_perception_msgs.msg import ObjectProposal3DArray
 from tf2_ros import Buffer, TransformListener
-from vision_msgs.msg import Detection3DArray
 
 from scene_graph_ros.json_export import (
     export_scene_graph_json_if_configured,
@@ -48,7 +48,7 @@ class SemanticState(str, Enum):
 
 SCENE_GRAPH_PARAMETER_DEFAULTS = {
     "odom_topic": "/odom",
-    "3d_detections_topic": "/semantic_node/detections",
+    "object_proposals_topic": "/semantic_perception/object_proposals",
     "map_topic": "/mapUAV",
     "stable_regions_topic": "/dude/regions_stable",
     "fixed_frame_id": "odom",
@@ -56,10 +56,10 @@ SCENE_GRAPH_PARAMETER_DEFAULTS = {
     "odom_qos_reliability": "reliable",
     "odom_qos_durability": "volatile",
     "odom_qos_depth": 10,
-    "detections_qos_history": "keep_last",
-    "detections_qos_reliability": "reliable",
-    "detections_qos_durability": "volatile",
-    "detections_qos_depth": 10,
+    "proposals_qos_history": "keep_last",
+    "proposals_qos_reliability": "reliable",
+    "proposals_qos_durability": "volatile",
+    "proposals_qos_depth": 10,
     "map_qos_history": "keep_last",
     "map_qos_reliability": "reliable",
     "map_qos_durability": "volatile",
@@ -90,7 +90,9 @@ SCENE_GRAPH_PARAMETER_DEFAULTS = {
     "pose_time_threshold": 5.0,
     "pose_rotation_threshold": 0.0,
     "pose_window_size": 3,
-    "obj_spatial_merge_threshold": 0.75,
+    "obj_spatial_association_threshold": 0.75,
+    "obj_semantic_similarity_threshold": 0.7,
+    "obj_position_update_policy": "latest",
     "room_z_offset": 12.0,
     "region_z_offset": 8.0,
     "nav_region_boundary_epsilon_m": 0.15,
@@ -146,7 +148,7 @@ SCENE_GRAPH_PARAMETER_DEFAULTS = {
 SCENE_GRAPH_PARAMETER_GROUPS = {
     "ROS Topics & Frames": [
         "odom_topic",
-        "3d_detections_topic",
+        "object_proposals_topic",
         "map_topic",
         "stable_regions_topic",
         "fixed_frame_id",
@@ -156,10 +158,10 @@ SCENE_GRAPH_PARAMETER_GROUPS = {
         "odom_qos_reliability",
         "odom_qos_durability",
         "odom_qos_depth",
-        "detections_qos_history",
-        "detections_qos_reliability",
-        "detections_qos_durability",
-        "detections_qos_depth",
+        "proposals_qos_history",
+        "proposals_qos_reliability",
+        "proposals_qos_durability",
+        "proposals_qos_depth",
         "map_qos_history",
         "map_qos_reliability",
         "map_qos_durability",
@@ -196,7 +198,9 @@ SCENE_GRAPH_PARAMETER_GROUPS = {
         "pose_window_size",
     ],
     "Object Manager (obj_*)": [
-        "obj_spatial_merge_threshold",
+        "obj_spatial_association_threshold",
+        "obj_semantic_similarity_threshold",
+        "obj_position_update_policy",
     ],
     "Room Bootstrap": ["room_z_offset"],
     "Region Bootstrap": [
@@ -352,19 +356,26 @@ class SceneGraphOrchestrator(Node):
             enable_debug_logging=self._param_dict.get("enable_debug_logging", True),
             debug_log_interval=self._param_dict.get("debug_log_interval", 10),
         )
-        self.obj_manager = ObjectNodeManager(
-            sg_interface=self.sg,
-            logger=self.get_logger(),
-            spatial_merge_threshold=self._param_dict.get(
-                "obj_spatial_merge_threshold", 0.75
-            ),
-            enable_debug_logging=self._param_dict.get("enable_debug_logging", True),
-            debug_log_interval=self._param_dict.get("debug_log_interval", 10),
-        )
         self.room_manager = RoomManager(
             sg_interface=self.sg,
             logger=self.get_logger(),
             z_offset=float(self._param_dict.get("room_z_offset", 12.0)),
+        )
+        self.obj_manager = ObjectNodeManager(
+            sg_interface=self.sg,
+            logger=self.get_logger(),
+            spatial_association_threshold=float(
+                self._param_dict.get("obj_spatial_association_threshold", 0.75)
+            ),
+            semantic_similarity_threshold=float(
+                self._param_dict.get("obj_semantic_similarity_threshold", 0.7)
+            ),
+            position_update_policy=str(
+                self._param_dict.get("obj_position_update_policy", "latest")
+            ),
+            room_manager=self.room_manager,
+            enable_debug_logging=self._param_dict.get("enable_debug_logging", True),
+            debug_log_interval=self._param_dict.get("debug_log_interval", 10),
         )
         self.region_manager = RegionManager(
             sg_interface=self.sg,
@@ -665,7 +676,7 @@ class SceneGraphOrchestrator(Node):
 
     def _create_subscribers(self):
         odom_qos = self._build_topic_qos("odom")
-        detections_qos = self._build_topic_qos("detections")
+        proposals_qos = self._build_topic_qos("proposals")
         map_qos = self._build_topic_qos("map")
         stable_regions_qos = self._build_topic_qos("stable_regions", default_depth=20)
 
@@ -677,10 +688,10 @@ class SceneGraphOrchestrator(Node):
             callback_group=self._pose_callback_group,
         )
         self.detections_subscriber = self.create_subscription(
-            Detection3DArray,
-            self._param_dict.get("3d_detections_topic"),
+            ObjectProposal3DArray,
+            self._param_dict.get("object_proposals_topic"),
             self._detections_callback,
-            detections_qos,
+            proposals_qos,
         )
         self.map_subscriber = self.create_subscription(
             OccupancyGrid,
@@ -698,7 +709,7 @@ class SceneGraphOrchestrator(Node):
         self.get_logger().info("Subscribers created:")
         self.get_logger().info(f"  - Odometry: {self._param_dict.get('odom_topic')}")
         self.get_logger().info(
-            f"  - 3D Detections: {self._param_dict.get('3d_detections_topic')}"
+            f"  - Semantic proposals: {self._param_dict.get('object_proposals_topic')}"
         )
         self.get_logger().info(f"  - Map: {self._param_dict.get('map_topic')}")
         self.get_logger().info(
@@ -769,13 +780,13 @@ class SceneGraphOrchestrator(Node):
                 throttle_duration_sec=2.0,
             )
 
-    def _detections_callback(self, msg: Detection3DArray):
-        """Queue detections without blocking behind graph maintenance."""
+    def _detections_callback(self, msg: ObjectProposal3DArray):
+        """Queue semantic proposals without blocking behind graph maintenance."""
         now_sec = self.get_clock().now().nanoseconds / 1e9
         queued = self.detection_queue.enqueue(msg, now_sec)
         self.get_logger().debug(
-            "[detections_callback] queued "
-            f"seq={queued.sequence} detections={len(msg.detections)} "
+            "[proposals_callback] queued "
+            f"seq={queued.sequence} proposals={len(msg.proposals)} "
             f"stamp={self.detection_queue.snapshot().get('last_msg_stamp_sec')} "
             f"ros_now={now_sec:.3f} frame={msg.header.frame_id!r} "
             f"pending={self.detection_queue.pending_count()}",
@@ -783,8 +794,17 @@ class SceneGraphOrchestrator(Node):
         )
         self._flush_pending_detections(max_messages=1)
 
-    def _resolve_detection_transform(self, msg: Detection3DArray):
-        """Resolve the optional detection-frame transform outside the graph lock."""
+    def _current_room_for_object_processing(self) -> Optional[int]:
+        """Return the room selected by the existing region-transition state."""
+        if self.current_room_id is not None:
+            return int(self.current_room_id)
+        pose_node_id = self._get_current_pose_node_id()
+        if pose_node_id is None:
+            return None
+        return self.room_manager.get_room_id_for_direct_member(pose_node_id)
+
+    def _resolve_detection_transform(self, msg: ObjectProposal3DArray):
+        """Resolve the proposal-frame transform outside the graph lock."""
         fixed_frame_id = self._param_dict.get("fixed_frame_id", "world")
         detection_frame = str(msg.header.frame_id or "")
         if detection_frame and detection_frame != fixed_frame_id:
@@ -803,7 +823,7 @@ class SceneGraphOrchestrator(Node):
                 )
             except Exception as exc:
                 self.get_logger().warning(
-                    "[detections_flush] rejected message: "
+                    "[proposals_flush] rejected message: "
                     f"tf_lookup_failed {detection_frame}->{fixed_frame_id}: {exc}",
                     throttle_duration_sec=5.0,
                 )
@@ -812,11 +832,11 @@ class SceneGraphOrchestrator(Node):
         return None
 
     def _detection_flush_tick(self):
-        """Apply queued detections with bounded graph-lock waiting."""
+        """Apply queued proposals with bounded graph-lock waiting."""
         self._flush_pending_detections()
 
     def _flush_pending_detections(self, max_messages: Optional[int] = None):
-        """Drain queued detection messages into OBJECT nodes."""
+        """Drain semantic-perception proposals into OBJECT nodes."""
         flush_start_t = time.perf_counter()
         pending = self.detection_queue.pending_count()
         if pending <= 0:
@@ -851,7 +871,7 @@ class SceneGraphOrchestrator(Node):
             self.detection_queue.push_front(item for item, _ in ready)
             diag = self.detection_queue.snapshot()
             self.get_logger().warning(
-                "[detections_flush] deferred because graph lock is busy "
+                "[proposals_flush] deferred because graph lock is busy "
                 f"pending={diag['pending_messages']} "
                 f"received={diag['messages_received']} "
                 f"accepted={diag['detections_accepted']} "
@@ -877,6 +897,7 @@ class SceneGraphOrchestrator(Node):
                     self.tf_buffer,
                     fixed_frame_id=fixed_frame_id,
                     transform_stamped=transform_stamped,
+                    room_id=self._current_room_for_object_processing(),
                 )
                 self.detection_queue.record_apply_result(
                     detection_stats,
@@ -886,8 +907,8 @@ class SceneGraphOrchestrator(Node):
                     self.sg.query.find_nodes_by_type(NodeType.OBJECT)
                 )
                 self.get_logger().debug(
-                    "[detections_flush] applied "
-                    f"seq={queued.sequence} detections={len(queued.msg.detections)} "
+                    "[proposals_flush] applied "
+                    f"seq={queued.sequence} proposals={len(queued.msg.proposals)} "
                     f"accepted={detection_stats.get('accepted_detections', 0)} "
                     f"rejected={detection_stats.get('rejected_detections', 0)} "
                     f"created={detection_stats.get('new_objects', 0)} "
@@ -910,7 +931,7 @@ class SceneGraphOrchestrator(Node):
             import traceback
 
             self.get_logger().error(
-                f"[detections_flush] failed while applying queued detections: {exc}\n"
+                f"[proposals_flush] failed while applying queued proposals: {exc}\n"
                 f"{traceback.format_exc()}"
             )
         finally:

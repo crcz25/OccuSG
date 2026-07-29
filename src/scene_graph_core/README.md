@@ -40,7 +40,7 @@ The top-level JSON object contains:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "metadata": {
     "frame_id": "odom",
     "graph_name": "small_house_run",
@@ -75,6 +75,55 @@ The top-level JSON object contains:
 conversion. `geometry` and `semantic` are convenience projections copied from
 known keys already present in `attributes`; the original keys remain in
 `attributes`.
+
+### OBJECT nodes
+
+Schema `1.1` gives every `OBJECT` node an explicit `semantic` block so consumers
+never have to reach into the raw attribute bag:
+
+```json
+{
+  "id": 1000000,
+  "type": "OBJECT",
+  "layer": "OBJECT",
+  "created_at": 1778481460.35,
+  "last_seen": 1778481492.71,
+  "semantic": {
+    "room_id": 4000000,
+    "position": {"x": 1.2, "y": -0.4, "z": 0.6},
+    "first_seen": 1778481460.35,
+    "observation_count": 12,
+    "embedding_observation_count": 12,
+    "object_embedding": [0.031, -0.017, "..."],
+    "last_semantic_similarity": 0.94,
+    "class_name": "",
+    "class_id": 0,
+    "detection_confidence": 0.61,
+    "detector_source": "groundingdino",
+    "similarity_score": 0.0,
+    "entropy_score": 0.0,
+    "semantic_perception_id": 2,
+    "valid_3d": true,
+    "bbox_3d_size": [0.42, 0.38, 0.71]
+  }
+}
+```
+
+- `object_embedding` is a JSON array of numbers: the unit-norm running mean of the
+  `fused_embedding` values of every valid observation associated with the node.
+  It is `null` when no valid embedding has ever been observed.
+- `observation_count` counts detections associated with the node;
+  `embedding_observation_count` counts only the embeddings folded into the running
+  mean. The two diverge when observations arrive without a usable embedding.
+- `room_id` is resolved from the node's single `ROOM_CONTAINS` parent, or `null`.
+- `first_seen` mirrors `created_at`; `last_seen` is the most recent association.
+
+`detection_score` and `object_id`, written by the removed detector-based object
+pipeline, are stripped from both `attributes` and `semantic` on export.
+
+`scene_graph_core.algorithms.semantic` provides the ROS-free
+`normalize_embedding`, `cosine_similarity`, and `running_mean_embedding` helpers
+that define these representation rules.
 
 User metadata is merged with computed metadata. Computed fields
 `num_nodes`, `num_edges`, `node_type_counts`, and `edge_type_counts` are

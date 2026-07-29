@@ -201,19 +201,10 @@ def generate_launch_description() -> LaunchDescription:
 
     perception = Node(
         package="semantic_perception",
-        executable="semantic_perception",
-        name="semantic_node",
-        output="log",
-        parameters=[
-            params,
-            {
-                "use_sim_time": use_sim_time,
-                "rgb_topic": "/rgb",
-                "depth_topic": "/depth",
-                "depth_info_topic": "/depth/camera_info",
-                "target_frame": "odom",
-            },
-        ],
+        executable="semantic_perception_node",
+        name="semantic_perception",
+        output="screen",
+        parameters=[params, {"use_sim_time": use_sim_time}],
     )
 
     inc_dude = Node(

@@ -63,7 +63,7 @@ LABEL_KEYS = (
 CONFIDENCE_KEYS = (
     "confidence",
     "score",
-    "detection_score",
+    "detection_confidence",
     "probability",
     "semantic_score",
 )
