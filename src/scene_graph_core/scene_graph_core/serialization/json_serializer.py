@@ -33,27 +33,46 @@ GEOMETRY_ATTRIBUTE_KEYS = (
 
 SEMANTIC_ATTRIBUTE_KEYS = (
     "class_name",
-    "class_id",
+    "class_confidence",
+    "class_evidence",
     "detection_confidence",
     "detector_source",
-    "similarity_score",
-    "entropy_score",
     "object_embedding",
+    "label_embedding",
+    "mask_embedding",
+    "bbox_embedding",
+    "fused_embedding",
+    "detection_observation_count",
     "embedding_observation_count",
-    "observation_count",
     "last_semantic_similarity",
-    "semantic_perception_id",
-    "valid_3d",
+    "semantic_perception_class_id",
     "bbox_3d_size",
     "signature_set",
     "object_in_los",
 )
 
-# Attributes written only by the removed detector-based object pipeline.
+# Unit-norm embedding vectors exported as plain numeric JSON arrays.
+OBJECT_EMBEDDING_KEYS = (
+    "object_embedding",
+    "label_embedding",
+    "mask_embedding",
+    "bbox_embedding",
+    "fused_embedding",
+)
+
+# Attributes written only by pipelines that have been removed: the detector-based
+# object pipeline and the weighted running-mean embedding representation.
 OBSOLETE_OBJECT_ATTRIBUTE_KEYS = frozenset(
     {
         "detection_score",
         "object_id",
+        "class_id",
+        "observation_count",
+        "valid_3d",
+        "semantic_perception_id",
+        "embedding_sum",
+        "similarity_score",
+        "entropy_score",
     }
 )
 
@@ -70,7 +89,7 @@ PROTECTED_METADATA_KEYS = frozenset(
 class SceneGraphJsonSerializer:
     """Serialize all persisted nodes and edges in a scene graph to JSON."""
 
-    schema_version = "1.1"
+    schema_version = "2.0"
 
     def to_dict(
         self,
@@ -204,23 +223,32 @@ class SceneGraphJsonSerializer:
         # Object nodes carry the semantic-perception tracking state explicitly so
         # downstream tooling never has to reach into the raw attribute bag.
         pose = entry["pose"] or {}
-        embedding = normalize_embedding(attributes.get("object_embedding"))
-        entry["semantic"].update(
+        room_id = self._room_id_for_object(node, graph)
+        semantic = entry["semantic"]
+        semantic.update(
             {
-                "room_id": self._room_id_for_object(node, graph),
+                "room_id": room_id,
+                "room_assigned": room_id is not None,
                 "position": pose.get("position"),
-                "observation_count": attributes.get("observation_count", 0),
+                "bbox_3d_size": attributes.get("bbox_3d_size"),
+                "class_name": attributes.get("class_name") or None,
+                "class_confidence": attributes.get("class_confidence", 0.0),
+                "class_evidence": attributes.get("class_evidence") or {},
+                "detection_observation_count": attributes.get(
+                    "detection_observation_count", 0
+                ),
                 "embedding_observation_count": attributes.get(
                     "embedding_observation_count", 0
                 ),
-                "first_seen": entry["created_at"],
-                "object_embedding": (
-                    embedding.astype(np.float32).tolist()
-                    if embedding is not None
-                    else None
-                ),
+                "first_seen": attributes.get("first_seen", entry["created_at"]),
+                "last_seen": entry["last_seen"],
             }
         )
+        for key in OBJECT_EMBEDDING_KEYS:
+            vector = normalize_embedding(attributes.get(key))
+            semantic[key] = (
+                vector.astype(np.float32).tolist() if vector is not None else None
+            )
         return entry
 
     def _room_id_for_object(self, node: Any, graph: SceneGraph) -> Optional[int]:

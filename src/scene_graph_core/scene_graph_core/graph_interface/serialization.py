@@ -6,7 +6,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from ..representation import BaseNode, Edge, EdgeType, NodeLayer, NodeType, SceneGraph
 from ..representation.node import pose_from_dict
-from ..serialization import SceneGraphJsonSerializer
+from ..serialization import OBSOLETE_OBJECT_ATTRIBUTE_KEYS, SceneGraphJsonSerializer
 
 
 class SerializationInterface:
@@ -175,12 +175,24 @@ class SerializationInterface:
         if str(data.get("type", data.get("node_type", ""))).upper() != "OBJECT":
             return attributes
 
+        # Fields written by removed pipelines never re-enter a live graph.
+        for key in OBSOLETE_OBJECT_ATTRIBUTE_KEYS:
+            attributes.pop(key, None)
+
         # Tolerate exports whose object tracking state was promoted out of the
         # attribute bag into top-level node fields.
         for key in (
             "object_embedding",
-            "observation_count",
+            "label_embedding",
+            "mask_embedding",
+            "bbox_embedding",
+            "fused_embedding",
+            "class_name",
+            "class_confidence",
+            "class_evidence",
+            "detection_observation_count",
             "embedding_observation_count",
+            "first_seen",
         ):
             if key in data and key not in attributes:
                 attributes[key] = data[key]

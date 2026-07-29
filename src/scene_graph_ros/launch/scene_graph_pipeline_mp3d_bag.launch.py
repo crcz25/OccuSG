@@ -56,6 +56,8 @@ def generate_launch_description() -> LaunchDescription:
     use_sim_time = LaunchConfiguration("use_sim_time")
     region_map_topic = LaunchConfiguration("region_map_topic")
     stable_regions_topic = LaunchConfiguration("stable_regions_topic")
+    log_level = LaunchConfiguration("log_level")
+    projection_diagnostics = LaunchConfiguration("projection_diagnostics")
     enable_profiling = LaunchConfiguration("enable_profiling")
     profiling_output_path = LaunchConfiguration("profiling_output_path")
     profiling_run_name = LaunchConfiguration("profiling_run_name")
@@ -113,6 +115,16 @@ def generate_launch_description() -> LaunchDescription:
             "stable_regions_topic",
             default_value="/dude/regions",
             description="Region2DArray topic consumed by scene_graph_region.",
+        ),
+        DeclareLaunchArgument(
+            "log_level",
+            default_value="info",
+            description="Logger severity for the perception and scene-graph nodes.",
+        ),
+        DeclareLaunchArgument(
+            "projection_diagnostics",
+            default_value="false",
+            description="Log a per-frame camera-to-graph projection trace (DEBUG).",
         ),
         DeclareLaunchArgument(
             "enable_profiling",
@@ -204,7 +216,14 @@ def generate_launch_description() -> LaunchDescription:
         executable="semantic_perception_node",
         name="semantic_perception",
         output="screen",
-        parameters=[params, {"use_sim_time": use_sim_time}],
+        arguments=["--ros-args", "--log-level", log_level],
+        parameters=[
+            params,
+            {
+                "use_sim_time": use_sim_time,
+                "publish_projection_diagnostics": projection_diagnostics,
+            },
+        ],
     )
 
     inc_dude = Node(
@@ -228,6 +247,7 @@ def generate_launch_description() -> LaunchDescription:
         executable="scene_graph_region",
         name="scene_graph_region",
         output="screen",
+        arguments=["--ros-args", "--log-level", log_level],
         parameters=[
             params,
             {

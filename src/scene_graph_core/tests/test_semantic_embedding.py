@@ -7,9 +7,12 @@ import numpy as np
 import pytest
 
 from scene_graph_core.algorithms.semantic import (
+    accumulate_class_evidence,
+    accumulate_embedding,
+    canonical_class_from_evidence,
     cosine_similarity,
+    mean_embedding,
     normalize_embedding,
-    running_mean_embedding,
 )
 
 
@@ -78,76 +81,143 @@ def test_cosine_similarity_rejects_invalid_input(left, right):
     assert cosine_similarity(left, right) is None
 
 
-# ========== running_mean_embedding ==========
+# ========== accumulate_embedding ==========
 
 
-def test_running_mean_seeds_from_first_observation():
-    mean, count = running_mean_embedding(None, 0, [0.0, 3.0])
+def test_accumulator_seeds_from_first_observation():
+    total, count, mean = accumulate_embedding(None, 0, [0.0, 3.0])
     assert count == 1
+    assert np.allclose(total, [0.0, 1.0], atol=1e-6)
     assert np.allclose(mean, [0.0, 1.0], atol=1e-6)
 
 
-def test_running_mean_matches_incremental_formula():
-    e_old = normalize_embedding([1.0, 0.0])
-    e_new = normalize_embedding([0.0, 1.0])
-    mean, count = running_mean_embedding(e_old, 3, e_new)
+def test_accumulator_matches_the_sum_of_unit_observations():
+    observations = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+    total, count, mean = None, 0, None
+    for observation in observations:
+        total, count, mean = accumulate_embedding(total, count, observation)
 
-    expected = (3 * e_old.astype(np.float64) + e_new) / 4
-    expected = expected / np.linalg.norm(expected)
+    expected_sum = sum(
+        (np.asarray(o, dtype=np.float64) / np.linalg.norm(o) for o in observations),
+        np.zeros(2),
+    )
+    assert count == 3
+    assert np.allclose(total, expected_sum, atol=1e-6)
+    assert np.allclose(mean, expected_sum / np.linalg.norm(expected_sum), atol=1e-6)
+    # The stored mean equals normalize(sum / count).
+    assert np.allclose(mean, mean_embedding(total, count), atol=1e-6)
 
-    assert count == 4
-    assert np.allclose(mean, expected, atol=1e-6)
+
+def test_accumulator_is_order_independent():
+    forward, backward = (None, 0), (None, 0)
+    observations = [[1.0, 0.0], [0.0, 1.0], [1.0, 2.0], [3.0, 1.0]]
+    for observation in observations:
+        forward = accumulate_embedding(forward[0], forward[1], observation)[:2]
+    for observation in reversed(observations):
+        backward = accumulate_embedding(backward[0], backward[1], observation)[:2]
+    assert forward[1] == backward[1] == 4
+    assert np.allclose(forward[0], backward[0], atol=1e-6)
 
 
-def test_running_mean_converges_towards_repeated_observation():
-    mean, count = normalize_embedding([1.0, 0.0]), 1
-    target = normalize_embedding([0.0, 1.0])
+def test_accumulator_converges_towards_repeated_observation():
+    total, count, mean = accumulate_embedding(None, 0, [1.0, 0.0])
+    target = [0.0, 1.0]
     for _ in range(200):
-        mean, count = running_mean_embedding(mean, count, target)
+        total, count, mean = accumulate_embedding(total, count, target)
 
     assert count == 201
     assert cosine_similarity(mean, target) > 0.99
 
 
-def test_running_mean_ignores_invalid_new_observation():
-    e_old = normalize_embedding([1.0, 0.0])
-    mean, count = running_mean_embedding(e_old, 5, [float("nan"), 0.0])
-    assert count == 5
-    assert np.allclose(mean, e_old, atol=1e-6)
+def test_accumulator_ignores_invalid_new_observation():
+    total, count, mean = accumulate_embedding(None, 0, [1.0, 0.0])
+    for invalid in (None, [], [0.0, 0.0], [float("nan"), 0.0], [float("inf"), 1.0]):
+        total, count, mean = accumulate_embedding(total, count, invalid)
+        assert count == 1
+        assert np.allclose(mean, [1.0, 0.0], atol=1e-6)
 
 
-def test_running_mean_ignores_missing_new_observation():
-    e_old = normalize_embedding([1.0, 0.0])
-    mean, count = running_mean_embedding(e_old, 2, None)
-    assert count == 2
-    assert np.allclose(mean, e_old, atol=1e-6)
-
-
-def test_running_mean_reseeds_on_dimension_mismatch():
-    mean, count = running_mean_embedding([1.0, 0.0], 7, [0.0, 0.0, 4.0])
+def test_accumulator_reseeds_on_dimension_mismatch():
+    total, count, mean = accumulate_embedding([1.0, 0.0], 7, [0.0, 0.0, 4.0])
     assert count == 1
     assert np.allclose(mean, [0.0, 0.0, 1.0], atol=1e-6)
 
 
-def test_running_mean_reseeds_from_invalid_old_representation():
-    mean, count = running_mean_embedding([0.0, 0.0], 4, [2.0, 0.0])
+def test_accumulator_reseeds_from_invalid_accumulator():
+    total, count, mean = accumulate_embedding([float("nan"), 0.0], 4, [2.0, 0.0])
     assert count == 1
     assert np.allclose(mean, [1.0, 0.0], atol=1e-6)
 
 
-def test_running_mean_keeps_previous_mean_when_observations_cancel():
-    e_old = normalize_embedding([1.0, 0.0])
-    mean, count = running_mean_embedding(e_old, 1, [-1.0, 0.0])
-    assert count == 1
-    assert np.allclose(mean, e_old, atol=1e-6)
-
-
-def test_running_mean_tolerates_invalid_observation_count():
-    mean, count = running_mean_embedding([1.0, 0.0], "not-a-count", [0.0, 1.0])
+def test_accumulator_tolerates_invalid_observation_count():
+    total, count, mean = accumulate_embedding([1.0, 0.0], "not-a-count", [0.0, 1.0])
     assert count == 1
     assert np.allclose(mean, [0.0, 1.0], atol=1e-6)
 
 
-def test_running_mean_output_is_unit_norm():
-    mean, _ = running_mean_embedding([1.0, 0.0], 2, [0.0, 1.0])
+def test_cancelling_observations_leave_no_direction():
+    total, count, mean = accumulate_embedding(None, 0, [1.0, 0.0])
+    total, count, mean = accumulate_embedding(total, count, [-1.0, 0.0])
+    assert count == 2
+    assert np.allclose(total, [0.0, 0.0], atol=1e-6)
+    # The sum has no direction, so no unit-norm mean exists.
+    assert mean is None
+
+
+def test_accumulator_mean_is_unit_norm():
+    total, count, mean = accumulate_embedding([1.0, 0.0], 2, [0.0, 1.0])
     assert math.isclose(float(np.linalg.norm(mean)), 1.0, rel_tol=1e-6)
+
+
+def test_mean_embedding_requires_observations():
+    assert mean_embedding([1.0, 0.0], 0) is None
+    assert mean_embedding(None, 3) is None
+    assert np.allclose(mean_embedding([2.0, 0.0], 2), [1.0, 0.0], atol=1e-6)
+
+
+# ========== class evidence ==========
+
+
+def test_class_evidence_accumulates_weighted_observations():
+    evidence = accumulate_class_evidence(None, "chair", 0.8)
+    evidence = accumulate_class_evidence(evidence, "chair", 0.6)
+    evidence = accumulate_class_evidence(evidence, "table", 0.5)
+    assert evidence == pytest.approx({"chair": 1.4, "table": 0.5})
+
+
+def test_canonical_class_is_the_strongest_accumulated_class():
+    evidence = {"chair": 1.4, "table": 0.5, "lamp": 0.1}
+    name, confidence = canonical_class_from_evidence(evidence)
+    assert name == "chair"
+    assert confidence == pytest.approx(1.4 / 2.0)
+
+
+def test_canonical_class_is_not_the_latest_detection():
+    evidence = None
+    for _ in range(5):
+        evidence = accumulate_class_evidence(evidence, "chair", 1.0)
+    evidence = accumulate_class_evidence(evidence, "sofa", 1.0)
+    assert canonical_class_from_evidence(evidence)[0] == "chair"
+
+
+def test_class_evidence_trims_whitespace_and_skips_unusable_labels():
+    evidence = accumulate_class_evidence(None, "  potted plant  ", 1.0)
+    evidence = accumulate_class_evidence(evidence, "", 1.0)
+    evidence = accumulate_class_evidence(evidence, None, 1.0)
+    assert evidence == {"potted plant": 1.0}
+
+
+def test_class_evidence_defaults_invalid_weights_to_one():
+    for weight in (None, "x", 0.0, -1.0, float("nan")):
+        assert accumulate_class_evidence(None, "chair", weight) == {"chair": 1.0}
+
+
+def test_canonical_class_ties_break_on_name():
+    name, _ = canonical_class_from_evidence({"table": 1.0, "chair": 1.0})
+    assert name == "chair"
+
+
+def test_canonical_class_of_empty_evidence_is_none():
+    assert canonical_class_from_evidence(None) == (None, 0.0)
+    assert canonical_class_from_evidence({}) == (None, 0.0)
+    assert canonical_class_from_evidence({"chair": 0.0}) == (None, 0.0)

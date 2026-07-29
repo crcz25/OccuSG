@@ -14,9 +14,18 @@ import numpy as np
 from PIL import Image
 
 from semantic_perception.inference.crop_embeddings import CropEmbedding, encode_object_crops
-from semantic_perception.inference.embedding_cache import load_or_generate
+from semantic_perception.inference.embedding_cache import build_label_embedding_cache
 from semantic_perception.inference.geometry import Geometry3D, compute_geometry
-from semantic_perception.inference.models import Detection, ModelBundle
+from semantic_perception.inference.models import (
+    Detection,
+    ModelBundle,
+    non_maximum_suppression,
+)
+from semantic_perception.inference.vocabulary import (
+    build_detector_prompt,
+    parse_excluded_labels,
+    resolve_global_index,
+)
 
 
 @dataclass
@@ -41,12 +50,18 @@ class StandaloneInferencePipeline:
     ) -> None:
         self.config = config
         self.models = ModelBundle(config, str(config["device"]), warning, info)
-        self.prompts, self.text_embeddings, _ = load_or_generate(
-            config["prompt_csv_path"],
+        self.labels = build_label_embedding_cache(
+            config["class_labels_path"],
             config["class_embedding_cache_path"],
             self.models.clip.cache_key,
             self.models.clip.encode_texts,
             info,
+        )
+        info(self.labels.summary())
+        self.prompt = build_detector_prompt(
+            self.labels.vocabulary,
+            int(config["detector_vocabulary_size"]),
+            parse_excluded_labels(config.get("excluded_class_labels")),
         )
         self.warning = warning
 
@@ -58,12 +73,7 @@ class StandaloneInferencePipeline:
         camera_to_world: np.ndarray,
     ) -> list[StandaloneProposal]:
         _validate_sample(rgb, depth_m, intrinsics, camera_to_world)
-        detections = self.models.detector.detect(
-            rgb,
-            str(self.config["groundingdino_prompt"]),
-            float(self.config["detection_threshold"]),
-            float(self.config["text_threshold"]),
-        )
+        detections = self._detect(rgb)
         if not detections:
             return []
         boxes = [item.box_xyxy for item in detections]
@@ -74,9 +84,8 @@ class StandaloneInferencePipeline:
             rgb,
             boxes,
             masks,
+            [self.labels.by_index(item.class_index) for item in detections],
             self.models.clip.encode_images,
-            float(self.config["bbox_embedding_weight"]),
-            float(self.config["masked_embedding_weight"]),
             self.warning,
         )
         output = []
@@ -98,7 +107,14 @@ class StandaloneInferencePipeline:
                 float(self.config["max_depth_m"]),
                 camera_to_world,
             )
-            class_name, class_score = self._classify(embedding.fused_embedding)
+            class_name = detection.class_name
+            class_score = (
+                float(np.dot(embedding.mask_embedding, label_vector))
+                if embedding.mask_embedding.size
+                and (label_vector := self.labels.by_index(detection.class_index))
+                is not None
+                else None
+            )
             output.append(
                 StandaloneProposal(
                     detection,
@@ -112,12 +128,45 @@ class StandaloneInferencePipeline:
             )
         return output
 
-    def _classify(self, embedding: np.ndarray) -> tuple[str, float | None]:
-        if embedding.size == 0:
-            return "", None
-        scores = self.text_embeddings @ embedding
-        index = int(np.argmax(scores))
-        return self.prompts[index], float(scores[index])
+    def _detect(self, rgb: np.ndarray) -> list:
+        """Detect the whole vocabulary in one pass and label each result."""
+        candidates: list = []
+        for box, confidence, local_index, phrase in (
+            self.models.detector.detect_with_classes(
+                rgb,
+                self.prompt.labels,
+                self.prompt.caption,
+                float(self.config["detection_threshold"]),
+                float(self.config["text_threshold"]),
+            )
+        ):
+            global_index = resolve_global_index(
+                self.prompt, self.labels.vocabulary, local_index, phrase
+            )
+            class_name = (
+                self.labels.vocabulary.label_at(global_index)
+                if global_index is not None
+                else None
+            )
+            if not class_name:
+                continue
+            candidates.append(
+                Detection(
+                    box_xyxy=box,
+                    confidence=confidence,
+                    class_index=int(global_index),
+                    class_name=class_name,
+                    phrase=phrase,
+                )
+            )
+        if len(candidates) < 2:
+            return candidates
+        kept = non_maximum_suppression(
+            np.asarray([item.box_xyxy for item in candidates], dtype=np.float64),
+            np.asarray([item.confidence for item in candidates], dtype=np.float64),
+            float(self.config["detector_merge_iou_threshold"]),
+        )
+        return [candidates[index] for index in kept]
 
 
 def load_sample(
@@ -193,7 +242,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--pose", type=Path, default=sample.with_suffix(".txt"))
     parser.add_argument("--models-dir", type=Path, default=models)
     parser.add_argument(
-        "--prompt-csv", type=Path, default=package_root / "prompts/example_classes.csv"
+        "--class-labels", type=Path, default=package_root / "prompts/example_classes.csv"
     )
     parser.add_argument(
         "--cache",
@@ -215,7 +264,12 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--box-threshold", type=float, default=0.30)
     parser.add_argument("--text-threshold", type=float, default=0.25)
-    parser.add_argument("--prompt", default="object")
+    parser.add_argument(
+        "--vocabulary-size",
+        type=int,
+        default=0,
+        help="Detector labels to prompt with; 0 uses the whole vocabulary",
+    )
     parser.add_argument(
         "--min-proposals",
         type=int,
@@ -244,13 +298,13 @@ def main() -> None:
         "groundingdino_model": str(args.models_dir / "groundingdino_swint_ogc.pth"),
         "sam_model": str(args.models_dir / "mobile_sam.pt"),
         "sam_model_type": "vit_t",
-        "prompt_csv_path": str(args.prompt_csv),
+        "class_labels_path": str(args.class_labels),
         "class_embedding_cache_path": str(args.cache),
-        "groundingdino_prompt": args.prompt,
         "detection_threshold": args.box_threshold,
         "text_threshold": args.text_threshold,
-        "bbox_embedding_weight": 0.5,
-        "masked_embedding_weight": 0.5,
+        "detector_vocabulary_size": args.vocabulary_size,
+        "excluded_class_labels": args.exclude_classes,
+        "detector_merge_iou_threshold": 0.7,
         "min_valid_depth_points": 20,
         "max_depth_m": 10.0,
     }

@@ -15,9 +15,15 @@ def test_debug_image_contains_mask_box_and_class_label():
         np.array([1.0, 0.0], dtype=np.float32),
         np.array([1.0, 0.0], dtype=np.float32),
         np.array([1.0, 0.0], dtype=np.float32),
+        np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32),
     )
     proposal = Proposal(
-        Detection(np.array([20, 15, 80, 65], dtype=np.float32), 0.875),
+        Detection(
+            np.array([20, 15, 80, 65], dtype=np.float32),
+            0.875,
+            class_index=0,
+            class_name="chair",
+        ),
         mask,
         embedding,
         Geometry3D.invalid(),

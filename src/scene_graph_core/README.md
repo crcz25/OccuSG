@@ -40,7 +40,7 @@ The top-level JSON object contains:
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "2.0",
   "metadata": {
     "frame_id": "odom",
     "graph_name": "small_house_run",
@@ -78,7 +78,7 @@ known keys already present in `attributes`; the original keys remain in
 
 ### OBJECT nodes
 
-Schema `1.1` gives every `OBJECT` node an explicit `semantic` block so consumers
+Schema `2.0` gives every `OBJECT` node an explicit `semantic` block so consumers
 never have to reach into the raw attribute bag:
 
 ```json
@@ -90,44 +90,57 @@ never have to reach into the raw attribute bag:
   "last_seen": 1778481492.71,
   "semantic": {
     "room_id": 4000000,
+    "room_assigned": true,
     "position": {"x": 1.2, "y": -0.4, "z": 0.6},
     "first_seen": 1778481460.35,
-    "observation_count": 12,
-    "embedding_observation_count": 12,
+    "last_seen": 1778481492.71,
+    "class_name": "chair",
+    "class_confidence": 0.82,
+    "class_evidence": {"chair": 9.9, "stool": 2.1},
+    "detection_observation_count": 14,
+    "embedding_observation_count": 14,
     "object_embedding": [0.031, -0.017, "..."],
-    "last_semantic_similarity": 0.94,
-    "class_name": "",
-    "class_id": 0,
+    "label_embedding": [0.004, 0.052, "..."],
+    "mask_embedding": [0.011, -0.008, "..."],
+    "bbox_embedding": [0.019, -0.002, "..."],
+    "fused_embedding": [0.006, -0.005, "..."],
     "detection_confidence": 0.61,
     "detector_source": "groundingdino",
-    "similarity_score": 0.0,
-    "entropy_score": 0.0,
-    "semantic_perception_id": 2,
-    "valid_3d": true,
-    "bbox_3d_size": [0.42, 0.38, 0.71]
+    "bbox_3d_size": [0.42, 0.38, 0.71],
+    "last_semantic_similarity": 0.94
   }
 }
 ```
 
-- `object_embedding` is a JSON array of numbers: the unit-norm running mean of the
-  `fused_embedding` values of every valid observation associated with the node.
-  It is `null` when no valid embedding has ever been observed.
-- `observation_count` counts detections associated with the node;
-  `embedding_observation_count` counts only the embeddings folded into the running
-  mean. The two diverge when observations arrive without a usable embedding.
-- `room_id` is resolved from the node's single `ROOM_CONTAINS` parent, or `null`.
-- `first_seen` mirrors `created_at`; `last_seen` is the most recent association.
+- Every embedding is a plain numeric JSON array, unit-norm, or `null` when the
+  node has no usable vector. `mask_embedding`, `bbox_embedding`, and
+  `label_embedding` each have dimension `D`; `object_embedding` also has
+  dimension `3D` because it averages `fused_embedding` observations, which are
+  `concat(mask, bbox, label)`.
+- `object_embedding` is the normalized mean of every valid `fused_embedding`
+  associated with the node. The raw sum accumulator lives in `attributes`
+  (`embedding_sum`) and is deliberately not exported.
+- `detection_observation_count` counts detections folded into the node;
+  `embedding_observation_count` counts embeddings folded into the mean. They are
+  separate counters and neither is a physical-instance count.
+- `class_name` is the canonical class chosen from all accumulated
+  `class_evidence`, never the latest detection alone. `class_confidence` is the
+  winning class's share of the total evidence mass.
+- `room_id` is the object's single `ROOM_CONTAINS` parent; `room_assigned` is
+  `false` with `room_id: null` when the object lies outside every DuDe region and
+  beyond the configured boundary tolerance.
 
-`detection_score` and `object_id`, written by the removed detector-based object
-pipeline, are stripped from both `attributes` and `semantic` on export.
+Attributes written only by removed pipelines — `detection_score`, `object_id`,
+`class_id`, `observation_count`, `valid_3d`, `semantic_perception_id`, and the
+internal `embedding_sum` — are stripped from both `attributes` and `semantic` on
+export.
 
 `scene_graph_core.algorithms.semantic` provides the ROS-free
-`normalize_embedding`, `cosine_similarity`, and `running_mean_embedding` helpers
-that define these representation rules.
-
-User metadata is merged with computed metadata. Computed fields
-`num_nodes`, `num_edges`, `node_type_counts`, and `edge_type_counts` are
-protected and always reflect the exported graph.
+`normalize_embedding`, `cosine_similarity`, `accumulate_embedding`,
+`mean_embedding`, `accumulate_class_evidence`, and
+`canonical_class_from_evidence` helpers that define these rules;
+`scene_graph_core.algorithms.spatial.assign_region` defines point-in-region room
+membership with a boundary tolerance.
 
 ## File Writing
 

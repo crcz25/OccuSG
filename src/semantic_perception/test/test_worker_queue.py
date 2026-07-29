@@ -116,14 +116,22 @@ def test_put_result_discards_oldest_when_result_queue_is_full():
 
 
 def test_best_class_uses_cached_text_embeddings():
+    from semantic_perception.inference.embedding_cache import LabelEmbeddingCache
+    from semantic_perception.inference.vocabulary import Vocabulary
+
     pool = WorkerPool.__new__(WorkerPool)
-    pool.prompts = ["chair", "table"]
-    pool.text_embeddings = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    pool.labels = LabelEmbeddingCache(
+        vocabulary=Vocabulary(("chair", "table")),
+        embeddings=np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        dimension=2,
+        encode_seconds=0.0,
+        reused_cache=True,
+    )
 
     label, score = pool.best_class(np.array([0.2, 0.8], dtype=np.float32))
 
     assert label == "table"
-    assert score == np.float32(0.8)
+    assert score == pytest.approx(0.8, abs=1e-6)
 
 
 def test_worker_run_logs_full_exception_and_terminates_without_recovery():

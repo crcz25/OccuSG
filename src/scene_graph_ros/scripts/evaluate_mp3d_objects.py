@@ -64,6 +64,7 @@ CONFIDENCE_KEYS = (
     "confidence",
     "score",
     "detection_confidence",
+    "class_confidence",
     "probability",
     "semantic_score",
 )

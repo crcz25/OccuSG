@@ -124,6 +124,9 @@ def _make_proposal_array(
     proposal.centroid_3d.x = float(x)
     proposal.centroid_3d.y = float(y)
     proposal.fused_embedding = [float(value) for value in embedding]
+    proposal.mask_embedding = [1.0, 0.0, 0.0]
+    proposal.bbox_embedding = [0.0, 1.0, 0.0]
+    proposal.label_embedding = [0.0, 0.0, 1.0]
 
     msg.proposals.append(proposal)
     return msg
@@ -339,8 +342,8 @@ def test_merged_redetection_does_not_report_new_object_ids_again():
     obj_manager = ObjectNodeManager(
         sg_interface=sg,
         logger=MockLogger(),
-        spatial_association_threshold=0.75,
-        semantic_similarity_threshold=0.7,
+        spatial_association_distance=0.75,
+        semantic_similarity_threshold=0.70,
         enable_debug_logging=False,
     )
 
@@ -348,7 +351,6 @@ def test_merged_redetection_does_not_report_new_object_ids_again():
 
     first_stats = obj_manager.process_detections_update(
         _make_proposal_array(1.1, 1.0),
-        tf_buffer=None,
         fixed_frame_id="odom",
     )
     first_object_id = first_stats["new_object_ids"][0]
@@ -360,7 +362,6 @@ def test_merged_redetection_does_not_report_new_object_ids_again():
 
     second_stats = obj_manager.process_detections_update(
         _make_proposal_array(1.12, 1.0),
-        tf_buffer=None,
         fixed_frame_id="odom",
     )
     second_edge = _single_nearest_edge(sg, first_object_id)

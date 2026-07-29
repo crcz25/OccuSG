@@ -13,12 +13,21 @@ semantic_perception:
     camera_info_topic: "/rgb/camera_info"
     # ObjectProposal3DArray consumed by scene_graph_region.
     proposal_topic: "/semantic_perception/object_proposals"
+    # Graph frame that proposal geometry is projected into, using the transform
+    # valid at the RGB image timestamp. Frames without a valid transform are
+    # dropped rather than published in camera-local coordinates.
+    target_frame: "odom"
+    tf_timeout_sec: 0.2
+    # Per-frame projection trace at DEBUG level (frames, timestamps, camera and
+    # graph positions, applied transform, mask pixels, depth statistics).
+    publish_projection_diagnostics: false
     publish_debug_image: true
     debug_image_topic: "/semantic_perception/debug_image"
     debug_mask_alpha: 0.45
 
-    # Vocabulary + cached OpenCLIP text embeddings.
-    prompt_csv_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
+    # HM3D class vocabulary: drives Grounding DINO prompts, the published
+    # class_name, and the cached CLIP text embeddings.
+    class_labels_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
     class_embedding_cache_path: "models/labels/hm3d_openclip_embedding_cache.bin"
     openclip_model: "ViT-L-14"
     openclip_checkpoint_path: "models/clip/L_laion2b_s32b_b82k.bin"
@@ -29,7 +38,25 @@ semantic_perception:
     groundingdino_model: "models/groundingdino/groundingdino_swint_ogc.pth"
     sam_model: "models/mobilesam/mobile_sam.pt"
     sam_model_type: "vit_t"
-    groundingdino_prompt: "object"
+
+    # Grounding DINO is prompted with the whole detector vocabulary in ONE
+    # caption, "class1 . class2 . class3 .", so a frame needs a single pass
+    # (https://github.com/IDEA-Research/GroundingDINO/issues/85).
+    # Number of leading vocabulary labels used for that caption (the CSV is
+    # ordered by descending instance count). 0 uses the whole vocabulary, which
+    # exceeds the detector's 256-token text limit for the 1624-label HM3D table.
+    detector_vocabulary_size: 64
+    # Class labels to leave out of the detector prompt, comma separated. They stay
+    # in the vocabulary and keep their cached text embeddings; they are simply
+    # never prompted for, so they produce no detections and no object nodes.
+    # Exclusions are applied BEFORE detector_vocabulary_size, so removing a
+    # frequent class backfills the caption with the next most frequent one.
+    # Large background surfaces dominate the graph without adding usable
+    # structure: in a 291 s bag run they were 60 of 287 object nodes.
+    excluded_class_labels: "floor, ceiling"
+    # IoU above which overlapping boxes returned for the same region under
+    # neighbouring labels are merged, keeping the highest-confidence detection.
+    detector_merge_iou_threshold: 0.7
 
     device: "cuda"
     devices: ["cuda:0"]
@@ -44,9 +71,7 @@ semantic_perception:
 
     detection_threshold: 0.35
     text_threshold: 0.25
-    # fused_embedding = bbox_embedding_weight * bbox + masked_embedding_weight * mask.
-    bbox_embedding_weight: 0.5
-    masked_embedding_weight: 0.5
+    # fused_embedding = normalize(concat(mask, bbox, label)); dimension is 3 x D.
     sync_queue_size: 10
     sync_slop_seconds: 0.1
     min_valid_depth_points: 20
@@ -132,19 +157,23 @@ scene_graph_region:
     maintenance_hz: 0.5
     visualization_hz: 2.0
     process_map_in_callback: false
-    detections_tf_lookup_timeout_sec: 0.2
     maintenance_tick_warn_ms: 500.0
 
     pose_distance_threshold: 0.5
     pose_time_threshold: 10.0
     pose_window_size: 3
 
-    # Object association: a proposal joins an existing node only when it is
-    # within obj_spatial_association_threshold metres AND its fused_embedding
-    # reaches obj_semantic_similarity_threshold cosine similarity.
-    obj_spatial_association_threshold: 0.75
-    obj_semantic_similarity_threshold: 0.7
-    obj_position_update_policy: "latest"
+    # Object association. A proposal with no object node within
+    # object_spatial_association_distance creates one. When nearby nodes exist,
+    # the best cosine match at or above object_semantic_similarity_threshold is
+    # updated; if none qualifies the detection is counted as spatially ambiguous
+    # and no node is created.
+    object_spatial_association_distance: 1.5   # metres
+    object_semantic_similarity_threshold: 0.70  # cosine similarity, [-1, 1]
+    object_position_update_policy: "running_mean"
+    # Metres an object position may lie outside a DuDe region polygon and still
+    # be attached to that room. Used only to break ties for outside points.
+    object_room_boundary_tolerance: 0.10        # metres
 
     room_z_offset: 12.0
     region_z_offset: 8.0

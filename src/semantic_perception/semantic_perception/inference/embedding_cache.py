@@ -1,16 +1,24 @@
-"""Prompt CSV loading and a small, deterministic binary embedding cache."""
+"""Class-label CSV loading and a small, deterministic binary embedding cache."""
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import os
 import struct
 import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence, Tuple
 
 import numpy as np
+
+from semantic_perception.inference.vocabulary import (
+    Vocabulary,
+    VocabularyError,
+    canonical_label,
+    load_class_labels,
+)
 
 MAGIC = b"SPTE"
 VERSION = 1
@@ -22,53 +30,8 @@ class EmbeddingCacheError(ValueError):
 
 
 def load_prompts(path: str | os.PathLike[str]) -> Tuple[list[str], bytes]:
-    """Load a one-column CSV or an HM3D ``label; count`` table."""
-    source = Path(path).read_bytes()
-    try:
-        text = source.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise EmbeddingCacheError(f"Prompt CSV is not UTF-8: {path}") from exc
-
-    lines = text.splitlines()
-    first_line = next((line for line in lines if line.strip()), "")
-    hm3d_counts = first_line.casefold().startswith("object type name;")
-    reader = csv.reader(lines, delimiter=";" if hm3d_counts else ",")
-    prompts: list[str] = []
-    for row_number, row in enumerate(reader, start=1):
-        if not row or all(not value.strip() for value in row):
-            continue
-        if hm3d_counts and row_number == 1:
-            if len(row) != 2 or "object type name" not in row[0].casefold():
-                raise EmbeddingCacheError("HM3D CSV has an invalid header")
-            continue
-        if hm3d_counts:
-            if len(row) != 2 or not row[0].strip():
-                raise EmbeddingCacheError(
-                    f"HM3D CSV row {row_number} must contain a class and count"
-                )
-            try:
-                count = int(row[1].strip())
-            except ValueError as exc:
-                raise EmbeddingCacheError(
-                    f"HM3D CSV row {row_number} has an invalid instance count"
-                ) from exc
-            if count < 0:
-                raise EmbeddingCacheError(
-                    f"HM3D CSV row {row_number} has a negative instance count"
-                )
-            prompts.append(row[0].strip())
-            continue
-        if len(row) != 1 or not row[0].strip():
-            raise EmbeddingCacheError(
-                f"Prompt CSV row {row_number} must contain exactly one class name"
-            )
-        prompts.append(row[0].strip())
-
-    if not prompts:
-        raise EmbeddingCacheError(f"Prompt CSV contains no classes: {path}")
-    if len(set(prompts)) != len(prompts):
-        raise EmbeddingCacheError("Prompt CSV contains duplicate class names")
-    return prompts, source
+    """Load class labels from a one-column CSV or an HM3D ``label; count`` table."""
+    return load_class_labels(path)
 
 
 def source_hash(csv_contents: bytes, model_name: str) -> bytes:
@@ -176,3 +139,109 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     if not np.isfinite(norms).all() or np.any(norms <= 1e-12):
         raise EmbeddingCacheError("Text encoder returned zero or non-finite embeddings")
     return (matrix / norms).astype(np.float32)
+
+
+@dataclass(frozen=True)
+class LabelEmbeddingCache:
+    """Immutable CLIP text embeddings for one vocabulary, keyed by class index.
+
+    Every row is L2-normalized and finite. Lookups accept a global vocabulary
+    index or a canonical class name; a miss returns ``None`` so the caller can
+    reject the detection instead of substituting a zero vector.
+    """
+
+    vocabulary: Vocabulary
+    embeddings: np.ndarray
+    dimension: int
+    encode_seconds: float
+    reused_cache: bool
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.embeddings.nbytes)
+
+    def by_index(self, global_index: int | None) -> np.ndarray | None:
+        if global_index is None:
+            return None
+        index = int(global_index)
+        if index < 0 or index >= self.embeddings.shape[0]:
+            return None
+        return self.embeddings[index]
+
+    def by_name(self, class_name: str | None) -> np.ndarray | None:
+        if not class_name:
+            return None
+        return self.by_index(self.vocabulary.index_of(class_name))
+
+    def classify(self, image_embedding: np.ndarray) -> Tuple[int, float] | None:
+        """Return the closest label as ``(global_index, cosine_similarity)``.
+
+        The image embedding must already be unit-norm and of the cache dimension.
+        Used only for debug-image annotation; no pipeline decision depends on it.
+        """
+        value = np.asarray(image_embedding, dtype=np.float32).reshape(-1)
+        if value.size != self.dimension or not np.isfinite(value).all():
+            return None
+        scores = self.embeddings @ value
+        if scores.size == 0 or not np.isfinite(scores).all():
+            return None
+        best = int(np.argmax(scores))
+        return best, float(scores[best])
+
+    def summary(self) -> str:
+        return (
+            f"Encoded {self.embeddings.shape[0]} class labels "
+            f"({self.dimension}-D, {self.nbytes / 1024.0:.1f} KiB) in "
+            f"{self.encode_seconds:.2f} s "
+            f"({'reused cache' if self.reused_cache else 'generated cache'})"
+        )
+
+
+def build_label_embedding_cache(
+    csv_path: str | os.PathLike[str],
+    cache_path: str | os.PathLike[str],
+    model_name: str,
+    encoder: Callable[[Sequence[str]], np.ndarray],
+    logger: Callable[[str], None] | None = None,
+) -> LabelEmbeddingCache:
+    """Load the vocabulary and its CLIP text embeddings exactly once."""
+    started = time.monotonic()
+    labels, matrix, reused = load_or_generate(
+        csv_path, cache_path, model_name, encoder, logger
+    )
+    elapsed = time.monotonic() - started
+    vocabulary = Vocabulary(tuple(labels))
+    values = np.ascontiguousarray(np.asarray(matrix, dtype=np.float32))
+    if values.ndim != 2 or values.shape[0] != len(vocabulary) or values.shape[1] == 0:
+        raise EmbeddingCacheError(
+            "Label embedding matrix must have shape [number_of_labels, dimension]"
+        )
+    if not np.isfinite(values).all():
+        raise EmbeddingCacheError("Label embedding cache contains non-finite values")
+    norms = np.linalg.norm(values, axis=1)
+    if np.any(norms <= 1e-12):
+        raise EmbeddingCacheError("Label embedding cache contains a zero-norm entry")
+    values = (values / norms[:, None]).astype(np.float32)
+    values.setflags(write=False)
+    return LabelEmbeddingCache(
+        vocabulary=vocabulary,
+        embeddings=values,
+        dimension=int(values.shape[1]),
+        encode_seconds=float(elapsed),
+        reused_cache=bool(reused),
+    )
+
+
+__all__ = [
+    "EmbeddingCacheError",
+    "LabelEmbeddingCache",
+    "Vocabulary",
+    "VocabularyError",
+    "build_label_embedding_cache",
+    "canonical_label",
+    "load_or_generate",
+    "load_prompts",
+    "read_cache",
+    "source_hash",
+    "write_cache",
+]

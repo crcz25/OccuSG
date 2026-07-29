@@ -17,7 +17,6 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.time import Time
 from scene_graph_core.graph_interface import create_scene_graph_interface
 from scene_graph_core.representation import NodeType
 from semantic_perception_msgs.msg import ObjectProposal3DArray
@@ -37,6 +36,10 @@ from scene_graph_ros.profiling import ProfilingRecorder
 from scene_graph_ros.visualization_node import VisualizationNode
 
 logger = logging.getLogger(__name__)
+
+# Region-driven membership sync owns these types; OBJECT nodes are assigned from
+# their own position by the object room resolver instead.
+_REGION_SYNCED_MEMBER_TYPES = (NodeType.AGENT, NodeType.NAVIGATION)
 
 
 class SemanticState(str, Enum):
@@ -84,15 +87,15 @@ SCENE_GRAPH_PARAMETER_DEFAULTS = {
     "pose_watchdog_sec": 10.0,
     "visualization_hz": 1.0,
     "process_map_in_callback": False,
-    "detections_tf_lookup_timeout_sec": 0.2,
     "maintenance_tick_warn_ms": 500.0,
     "pose_distance_threshold": 5.0,
     "pose_time_threshold": 5.0,
     "pose_rotation_threshold": 0.0,
     "pose_window_size": 3,
-    "obj_spatial_association_threshold": 0.75,
-    "obj_semantic_similarity_threshold": 0.7,
-    "obj_position_update_policy": "latest",
+    "object_spatial_association_distance": 0.75,
+    "object_semantic_similarity_threshold": 0.70,
+    "object_position_update_policy": "running_mean",
+    "object_room_boundary_tolerance": 0.10,
     "room_z_offset": 12.0,
     "region_z_offset": 8.0,
     "nav_region_boundary_epsilon_m": 0.15,
@@ -188,7 +191,6 @@ SCENE_GRAPH_PARAMETER_GROUPS = {
         "pose_watchdog_sec",
         "visualization_hz",
         "process_map_in_callback",
-        "detections_tf_lookup_timeout_sec",
         "maintenance_tick_warn_ms",
     ],
     "Pose Manager (pose_*)": [
@@ -197,10 +199,11 @@ SCENE_GRAPH_PARAMETER_GROUPS = {
         "pose_rotation_threshold",
         "pose_window_size",
     ],
-    "Object Manager (obj_*)": [
-        "obj_spatial_association_threshold",
-        "obj_semantic_similarity_threshold",
-        "obj_position_update_policy",
+    "Object Manager (object_*)": [
+        "object_spatial_association_distance",
+        "object_semantic_similarity_threshold",
+        "object_position_update_policy",
+        "object_room_boundary_tolerance",
     ],
     "Room Bootstrap": ["room_z_offset"],
     "Region Bootstrap": [
@@ -313,6 +316,8 @@ class SceneGraphOrchestrator(Node):
         self._map_dirty = False
         self.latest_stable_regions_msg = None
         self.last_valid_stable_regions_msg = None
+        # Newest prepared DuDe region geometry, used to resolve object rooms.
+        self._latest_prepared_regions: Dict[int, PreparedTrackerRegion] = {}
         self._stable_regions_snapshot_is_stale = False
         self._consecutive_empty_region_updates = 0
         self._pose_callback_group = ReentrantCallbackGroup()
@@ -364,16 +369,17 @@ class SceneGraphOrchestrator(Node):
         self.obj_manager = ObjectNodeManager(
             sg_interface=self.sg,
             logger=self.get_logger(),
-            spatial_association_threshold=float(
-                self._param_dict.get("obj_spatial_association_threshold", 0.75)
+            spatial_association_distance=float(
+                self._param_dict.get("object_spatial_association_distance", 0.75)
             ),
             semantic_similarity_threshold=float(
-                self._param_dict.get("obj_semantic_similarity_threshold", 0.7)
+                self._param_dict.get("object_semantic_similarity_threshold", 0.70)
             ),
             position_update_policy=str(
-                self._param_dict.get("obj_position_update_policy", "latest")
+                self._param_dict.get("object_position_update_policy", "running_mean")
             ),
             room_manager=self.room_manager,
+            room_resolver=self._resolve_room_for_position,
             enable_debug_logging=self._param_dict.get("enable_debug_logging", True),
             debug_log_interval=self._param_dict.get("debug_log_interval", 10),
         )
@@ -386,6 +392,9 @@ class SceneGraphOrchestrator(Node):
             ),
             nav_region_enable_neighbor_tiebreak=bool(
                 self._param_dict.get("nav_region_enable_neighbor_tiebreak", True)
+            ),
+            object_room_boundary_tolerance=float(
+                self._param_dict.get("object_room_boundary_tolerance", 0.10)
             ),
         )
 
@@ -794,42 +803,56 @@ class SceneGraphOrchestrator(Node):
         )
         self._flush_pending_detections(max_messages=1)
 
-    def _current_room_for_object_processing(self) -> Optional[int]:
-        """Return the room selected by the existing region-transition state."""
-        if self.current_room_id is not None:
-            return int(self.current_room_id)
-        pose_node_id = self._get_current_pose_node_id()
-        if pose_node_id is None:
+    def _resolve_room_for_position(self, x: float, y: float) -> Optional[int]:
+        """Resolve a graph-frame position to a room via the DuDe region polygons.
+
+        Objects are assigned only from their own position: the region that
+        contains them, or the nearest region boundary within
+        ``object_room_boundary_tolerance``. Positions outside every region stay
+        unassigned rather than being forced into the nearest room.
+        """
+        prepared_regions = self._latest_prepared_regions
+        if not prepared_regions:
             return None
-        return self.room_manager.get_room_id_for_direct_member(pose_node_id)
+        assignment = self.region_manager.assign_object_region(x, y, prepared_regions)
+        if assignment.region_id is None:
+            return None
+        return self.room_manager.get_room_id_for_tracker_region(
+            int(assignment.region_id)
+        )
 
-    def _resolve_detection_transform(self, msg: ObjectProposal3DArray):
-        """Resolve the proposal-frame transform outside the graph lock."""
-        fixed_frame_id = self._param_dict.get("fixed_frame_id", "world")
-        detection_frame = str(msg.header.frame_id or "")
-        if detection_frame and detection_frame != fixed_frame_id:
-            try:
-                timeout_sec = float(
-                    self._param_dict.get("detections_tf_lookup_timeout_sec", 0.2)
-                )
-            except (TypeError, ValueError):
-                timeout_sec = 0.2
-            try:
-                return self.tf_buffer.lookup_transform(
-                    fixed_frame_id,
-                    detection_frame,
-                    Time(),
-                    Duration(seconds=max(0.0, timeout_sec)),
-                )
-            except Exception as exc:
-                self.get_logger().warning(
-                    "[proposals_flush] rejected message: "
-                    f"tf_lookup_failed {detection_frame}->{fixed_frame_id}: {exc}",
-                    throttle_duration_sec=5.0,
-                )
-                raise
+    def _reassign_object_rooms(
+        self,
+        prepared_regions: Dict[int, PreparedTrackerRegion],
+    ) -> dict[str, int]:
+        """Re-evaluate every object's room after a region-geometry update."""
+        stats = {"assigned": 0, "reassigned": 0, "unassigned": 0, "unchanged": 0}
+        if not prepared_regions:
+            return stats
 
-        return None
+        for node in self.sg.query.find_nodes_by_type(NodeType.OBJECT):
+            if node.id is None:
+                continue
+            object_id = int(node.id)
+            current_room_id = self.room_manager.get_room_id_for_direct_member(object_id)
+            target_room_id = self._resolve_room_for_position(
+                float(node.pose.position.x), float(node.pose.position.y)
+            )
+            if target_room_id == current_room_id:
+                stats["unchanged"] += 1
+                continue
+            if target_room_id is None:
+                self.room_manager.detach_direct_member_from_rooms(object_id)
+                stats["unassigned"] += 1
+                continue
+            if self.room_manager.attach_direct_member_to_room(
+                int(target_room_id),
+                object_id,
+                allow_reassignment=True,
+                reason="region_geometry_update",
+            ):
+                stats["reassigned" if current_room_id is not None else "assigned"] += 1
+        return stats
 
     def _detection_flush_tick(self):
         """Apply queued proposals with bounded graph-lock waiting."""
@@ -851,24 +874,14 @@ class SceneGraphOrchestrator(Node):
             return
 
         fixed_frame_id = self._param_dict.get("fixed_frame_id", "world")
-        ready: list[tuple[QueuedDetectionMessage, object]] = []
-        for queued in batch:
-            try:
-                transform_stamped = self._resolve_detection_transform(queued.msg)
-            except Exception:
-                self.detection_queue.record_tf_rejection("tf_lookup_failed")
-                continue
-            ready.append((queued, transform_stamped))
-
-        if not ready:
-            return
+        ready: list[QueuedDetectionMessage] = list(batch)
 
         timeout_ms = float(self._param_dict.get("detection_lock_timeout_ms", 5.0))
         start_t = time.perf_counter()
         acquired = self._sg_lock.acquire(timeout=max(0.0, timeout_ms / 1000.0))
         wait_ms = (time.perf_counter() - start_t) * 1000.0
         if not acquired:
-            self.detection_queue.push_front(item for item, _ in ready)
+            self.detection_queue.push_front(ready)
             diag = self.detection_queue.snapshot()
             self.get_logger().warning(
                 "[proposals_flush] deferred because graph lock is busy "
@@ -888,16 +901,13 @@ class SceneGraphOrchestrator(Node):
         try:
             applied_messages = 0
             accepted_detections = 0
-            for queued, transform_stamped in ready:
+            for queued in ready:
                 object_count_before = len(
                     self.sg.query.find_nodes_by_type(NodeType.OBJECT)
                 )
                 detection_stats = self.obj_manager.process_detections_update(
                     queued.msg,
-                    self.tf_buffer,
                     fixed_frame_id=fixed_frame_id,
-                    transform_stamped=transform_stamped,
-                    room_id=self._current_room_for_object_processing(),
                 )
                 self.detection_queue.record_apply_result(
                     detection_stats,
@@ -1045,8 +1055,12 @@ class SceneGraphOrchestrator(Node):
             prepared_region,
             prepared_regions=prepared_regions,
         )
+        # OBJECT membership is owned by the object room resolver, which assigns
+        # each object from its own position; this sync covers poses and free space.
         self.room_manager.sync_room_membership_from_region(
-            int(room_node_id), member_ids
+            int(room_node_id),
+            member_ids,
+            managed_types=_REGION_SYNCED_MEMBER_TYPES,
         )
         return member_ids
 
@@ -1094,6 +1108,7 @@ class SceneGraphOrchestrator(Node):
             self.room_manager.sync_room_membership_from_region(
                 int(room_id),
                 member_ids,
+                managed_types=_REGION_SYNCED_MEMBER_TYPES,
             )
             self.room_manager.build_room_region_signature_set(
                 int(room_id), persist=True
@@ -1461,6 +1476,9 @@ class SceneGraphOrchestrator(Node):
             (time.perf_counter() - snapshot_start_t) * 1000.0,
             metadata={"snapshot_valid": bool(snapshot_valid)},
         )
+        if snapshot_valid:
+            self._latest_prepared_regions = prepared_regions
+
         dirty_room_ids = set()
         relinked_tracker_region_ids: dict[int, int] = {}
         region_nav_ids_by_tracker_region: dict[int, set[int]] = {}
@@ -1506,6 +1524,7 @@ class SceneGraphOrchestrator(Node):
                 self.room_manager.sync_room_membership_from_region(
                     int(room_node.id),
                     member_ids,
+                    managed_types=_REGION_SYNCED_MEMBER_TYPES,
                 )
                 dirty_room_ids.add(int(room_node.id))
 
@@ -1515,6 +1534,20 @@ class SceneGraphOrchestrator(Node):
             ) = self._materialize_rooms_for_observed_regions(prepared_regions)
             dirty_room_ids.update(materialized_room_ids)
             region_nav_ids_by_tracker_region.update(materialized_region_nav_ids)
+
+            # Region geometry may have moved, split, or merged; every object's
+            # room membership is re-derived from its own position.
+            object_room_stats = self._reassign_object_rooms(prepared_regions)
+            if any(
+                object_room_stats[key] for key in ("assigned", "reassigned", "unassigned")
+            ):
+                self.get_logger().info(
+                    "[maintenance_tick] object room assignment "
+                    f"assigned={object_room_stats['assigned']} "
+                    f"reassigned={object_room_stats['reassigned']} "
+                    f"unassigned={object_room_stats['unassigned']} "
+                    f"unchanged={object_room_stats['unchanged']}"
+                )
 
         if regions_snapshot_is_stale:
             self.get_logger().warning(

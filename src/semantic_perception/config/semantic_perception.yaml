@@ -8,6 +8,15 @@ semantic_perception:
     camera_info_topic: "/rgb/camera_info"
     # ROS topic on which ObjectProposal3DArray results are published.
     proposal_topic: "/semantic_perception/object_proposals"
+    # Graph/world frame that object geometry is projected into. The transform is
+    # looked up at the RGB image's own timestamp; a missing, stale, or invalid
+    # transform drops the frame instead of publishing camera-local coordinates.
+    target_frame: "odom"
+    # TF lookup timeout, in seconds, for that camera-to-target transform.
+    tf_timeout_sec: 0.2
+    # Emit a per-frame projection trace at DEBUG level (frames, timestamps, raw
+    # camera position, final graph position, mask pixels, depth statistics).
+    publish_projection_diagnostics: false
     # Debug image: MobileSAM masks + DINO boxes/scores + best OpenCLIP label.
     # Whether to render and publish the annotated debug image below.
     publish_debug_image: true
@@ -16,9 +25,11 @@ semantic_perception:
     # Opacity of the mask overlay in the debug image, in [0, 1] (0 = invisible, 1 = opaque).
     debug_mask_alpha: 0.45
 
-    # Vocabulary CSV used to build the cached OpenCLIP text embeddings (one label per row,
-    # or an HM3D "label;count" table).
-    prompt_csv_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
+    # Class vocabulary CSV (one label per row, or an HM3D "label;count" table).
+    # It drives Grounding DINO prompts, the published class_name, and the cached
+    # CLIP text embeddings. Relative paths resolve against the workspace or the
+    # package share directory, never the current working directory.
+    class_labels_path: "models/labels/HM3D_CountsOfObjectTypes.csv"
     # Binary cache of OpenCLIP text embeddings for prompt_csv_path; regenerated automatically
     # whenever it is missing or the vocabulary/model no longer matches it.
     class_embedding_cache_path: "models/labels/hm3d_openclip_embedding_cache.bin"
@@ -41,10 +52,24 @@ semantic_perception:
     # SAM model registry key matching sam_model (e.g. "vit_t" for MobileSAM's tiny ViT).
     sam_model_type: "vit_t"
 
-    # The large HM3D vocabulary is cached for the later semantic module. Keep
-    # object proposal generation class-agnostic and within DINO's text limit.
-    # Open-vocabulary text prompt passed to GroundingDINO for class-agnostic object detection.
-    groundingdino_prompt: "object"
+    # Grounding DINO is prompted with the whole detector vocabulary in ONE
+    # caption, "class1 . class2 . class3 .", so a frame needs a single pass
+    # (https://github.com/IDEA-Research/GroundingDINO/issues/85).
+    # Number of leading vocabulary labels used for that caption (the CSV is
+    # ordered by descending instance count). 0 uses the whole vocabulary, which
+    # exceeds the detector's 256-token text limit for the 1624-label HM3D table.
+    detector_vocabulary_size: 64
+    # Class labels to leave out of the detector prompt, comma separated. They stay
+    # in the vocabulary and keep their cached text embeddings; they are simply
+    # never prompted for, so they produce no detections and no object nodes.
+    # Exclusions are applied BEFORE detector_vocabulary_size, so removing a
+    # frequent class backfills the caption with the next most frequent one.
+    # Large background surfaces dominate the graph without adding usable
+    # structure: in a 291 s bag run they were 60 of 287 object nodes.
+    excluded_class_labels: "floor, ceiling"
+    # IoU above which overlapping boxes returned for the same region under
+    # neighbouring labels are merged, keeping the highest-confidence detection.
+    detector_merge_iou_threshold: 0.7
 
     # Fallback compute device for any model whose own *_device override is not set.
     device: "cuda"
@@ -87,10 +112,9 @@ semantic_perception:
     detection_threshold: 0.35
     # GroundingDINO minimum text-match score for a detection to be kept, in [0, 1].
     text_threshold: 0.25
-    # Weight of the whole-bounding-box CLIP embedding when fusing it with the masked-crop embedding.
-    bbox_embedding_weight: 0.5
-    # Weight of the mask-only (background removed) CLIP embedding when fusing it with the bbox embedding.
-    masked_embedding_weight: 0.5
+    # fused_embedding is concat(mask_embedding, bbox_embedding, label_embedding),
+    # L2-normalized, so its dimension is exactly three times the CLIP dimension.
+    # There are no fusion weights: the concatenation order is fixed.
     # Queue size of the RGB/depth/CameraInfo ApproximateTimeSynchronizer.
     sync_queue_size: 10
     # Maximum timestamp difference, in seconds, allowed between RGB/depth/CameraInfo messages to be

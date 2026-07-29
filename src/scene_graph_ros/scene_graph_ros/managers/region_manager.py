@@ -12,6 +12,7 @@ from scene_graph_ros.managers.region_util import (
     point_in_polygon,
     prepare_region_geometry,
 )
+from scene_graph_core.algorithms.spatial import RegionAssignment, assign_region
 from scene_graph_core.graph_interface import SceneGraphInterface
 from scene_graph_core.representation import EdgeType, NodeType
 from shapely.geometry import Point, box
@@ -88,10 +89,16 @@ class RegionManager:
         z_offset: float = 8.0,
         nav_region_boundary_epsilon_m: float = 0.15,
         nav_region_enable_neighbor_tiebreak: bool = True,
+        object_room_boundary_tolerance: float = 0.10,
     ):
         self.sg = sg_interface
         self.logger = logger
         self.z_offset = float(z_offset)
+        # Metres an OBJECT position may lie outside a region polygon and still be
+        # attached to it. Used only to break ties for points outside every region.
+        self.object_room_boundary_tolerance = max(
+            0.0, float(object_room_boundary_tolerance)
+        )
         self.nav_region_boundary_epsilon_m = max(
             0.0, float(nav_region_boundary_epsilon_m)
         )
@@ -273,7 +280,44 @@ class RegionManager:
         if node.node_type == NodeType.NAVIGATION:
             return self._find_tracker_region_for_navigation_node(node, prepared_regions)
 
+        if node.node_type == NodeType.OBJECT:
+            assignment = self.assign_object_region(
+                float(node.pose.position.x),
+                float(node.pose.position.y),
+                prepared_regions,
+            )
+            return MembershipResolution(
+                tracker_region_id=assignment.region_id,
+                reason=assignment.reason,
+                plausible_tracker_region_ids=assignment.candidate_ids,
+                used_tiebreak=assignment.reason == "boundary_tolerance",
+            )
+
         return self._resolve_tracker_region_for_point_node(node, prepared_regions)
+
+    def assign_object_region(
+        self,
+        x: float,
+        y: float,
+        prepared_regions: Dict[int, PreparedTrackerRegion],
+    ) -> RegionAssignment:
+        """Resolve one object position to at most one tracker region.
+
+        Objects use only their representative position against the DuDe polygons:
+        strict containment first, then the nearest boundary within
+        ``object_room_boundary_tolerance``, otherwise unassigned. No footprint
+        overlap, signed-distance ranking, or membership hysteresis is applied.
+        """
+        regions = [
+            (int(tracker_region_id), prepared_region.prepared_geometry.points)
+            for tracker_region_id, prepared_region in sorted(prepared_regions.items())
+            if prepared_region.prepared_geometry.is_valid
+        ]
+        return assign_region(
+            (float(x), float(y)),
+            regions,
+            self.object_room_boundary_tolerance,
+        )
 
     def _resolve_tracker_region_for_point_node(
         self,

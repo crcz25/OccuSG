@@ -13,14 +13,21 @@ from typing import Callable
 import numpy as np
 
 from semantic_perception.inference.crop_embeddings import CropEmbedding, encode_object_crops
-from semantic_perception.inference.embedding_cache import load_or_generate
+from semantic_perception.inference.embedding_cache import build_label_embedding_cache
 from semantic_perception.inference.geometry import Geometry3D, compute_geometry
 from semantic_perception.inference.models import (
     Detection,
     ModelBundle,
     bind_thread_to_device,
     cuda_memory_summary,
+    non_maximum_suppression,
     release_cuda_memory,
+)
+from semantic_perception.inference.vocabulary import (
+    build_detector_prompt,
+    parse_excluded_labels,
+    resolve_global_index,
+    summarize,
 )
 
 
@@ -35,6 +42,9 @@ class Frame:
     intrinsics: tuple[float, float, float, float]
     camera_to_world: np.ndarray | None = None
     received_monotonic: float = 0.0
+    # Original optical frame and the timestamp of the transform actually applied.
+    source_frame_id: str = ""
+    transform_stamp_sec: float = 0.0
 
 
 @dataclass
@@ -43,6 +53,7 @@ class Proposal:
     mask: np.ndarray | None
     embeddings: CropEmbedding
     geometry: Geometry3D
+    mask_pixels: int = 0
 
 
 @dataclass
@@ -173,17 +184,43 @@ class WorkerPool:
             + ", ".join(f"worker {i} -> {d}" for i, d in enumerate(self._devices))
         )
         # Every worker owns its OpenCLIP model. The first creates the cache and
-        # subsequent workers strictly reuse it.
-        self.prompts, self.text_embeddings, _ = load_or_generate(
-            config["prompt_csv_path"],
+        # subsequent workers strictly reuse it. Text embeddings are computed once
+        # here and never re-encoded per detection or per frame.
+        self.labels = build_label_embedding_cache(
+            config["class_labels_path"],
             config["class_embedding_cache_path"],
             self._models[0].clip.cache_key,
             self._models[0].clip.encode_texts,
             info,
         )
-        # Text embeddings prepare the HM3D vocabulary for a later semantic
-        # module. Detection itself stays class-agnostic and uses a short prompt.
-        self._prompt = str(config["groundingdino_prompt"]).strip()
+        info(self.labels.summary())
+        excluded_labels = parse_excluded_labels(config.get("excluded_class_labels"))
+        unknown = self.labels.vocabulary.unknown_labels(excluded_labels)
+        if unknown:
+            warning(
+                f"excluded_class_labels contains {list(unknown)}, which are not in "
+                f"{config['class_labels_path']}; they exclude nothing"
+            )
+        self._prompt = build_detector_prompt(
+            self.labels.vocabulary,
+            int(config["detector_vocabulary_size"]),
+            excluded_labels,
+        )
+        tokens, token_limit = self._models[0].detector.caption_token_budget(
+            self._prompt.caption
+        )
+        info("Grounding DINO vocabulary: " + summarize(self._prompt)
+             + f", {tokens}/{token_limit} text tokens")
+        if tokens > token_limit:
+            raise ValueError(
+                f"The detector caption needs {tokens} text tokens but the model "
+                f"accepts {token_limit}; the trailing classes would be truncated "
+                f"and undetectable. Lower detector_vocabulary_size "
+                f"(currently {len(self._prompt.labels)})."
+            )
+        self._merge_iou_threshold = float(config["detector_merge_iou_threshold"])
+        if not 0.0 <= self._merge_iou_threshold <= 1.0:
+            raise ValueError("detector_merge_iou_threshold must be between 0 and 1")
         self._threads = [
             threading.Thread(
                 target=self._run,
@@ -234,14 +271,11 @@ class WorkerPool:
 
     def best_class(self, embedding: np.ndarray) -> tuple[str, float]:
         """Return the closest cached OpenCLIP class for debug visualization."""
-        value = np.asarray(embedding, dtype=np.float32).reshape(-1)
-        if value.size == 0 or value.size != self.text_embeddings.shape[1]:
+        result = self.labels.classify(embedding)
+        if result is None:
             return "", 0.0
-        scores = self.text_embeddings @ value
-        if scores.size == 0 or not np.isfinite(scores).any():
-            return "", 0.0
-        index = int(np.nanargmax(scores))
-        return self.prompts[index], float(scores[index])
+        global_index, similarity = result
+        return self.labels.vocabulary.label_at(global_index) or "", similarity
 
     def stats_report(self) -> tuple[str | None, str | None]:
         """Return ``(info, warning)`` describing activity since the last call."""
@@ -292,6 +326,11 @@ class WorkerPool:
             f"dropped input {dropped_input} / results "
             f"{count_delta.get('dropped_result', 0)} / stale "
             f"{count_delta.get('dropped_stale', 0)}"
+        )
+        info += (
+            f", labels (unmapped {count_delta.get('unmapped_phrase', 0)} / "
+            f"merged {count_delta.get('merged_duplicate', 0)} / "
+            f"cache miss {count_delta.get('label_cache_miss', 0)})"
         )
         memory = cuda_memory_summary(self._devices)
         if memory:
@@ -352,14 +391,63 @@ class WorkerPool:
     def all_workers_failed(self) -> bool:
         return not any(thread.is_alive() for thread in self._threads)
 
-    def _process(self, frame: Frame, models: ModelBundle) -> FrameResult:
-        started = time.monotonic()
-        detections = models.detector.detect(
-            frame.rgb,
-            self._prompt,
+    def counters(self) -> dict[str, int]:
+        """Return cumulative pipeline counters for diagnostics and tests."""
+        counts, _, _ = self._stats.snapshot()
+        return dict(counts)
+
+    def _detect_vocabulary(self, rgb: np.ndarray, models: ModelBundle) -> list[Detection]:
+        """Detect the whole vocabulary in one pass and label each result.
+
+        The prompt carries a local-to-global index map, so a detector result
+        always resolves to exactly one vocabulary entry. Results whose phrase maps
+        to no entry are dropped rather than given a fabricated label.
+        """
+        candidates: list[Detection] = []
+        unmapped = 0
+        for box, confidence, local_index, phrase in models.detector.detect_with_classes(
+            rgb,
+            self._prompt.labels,
+            self._prompt.caption,
             float(self._config["detection_threshold"]),
             float(self._config["text_threshold"]),
+        ):
+            global_index = resolve_global_index(
+                self._prompt, self.labels.vocabulary, local_index, phrase
+            )
+            if global_index is None:
+                unmapped += 1
+                continue
+            class_name = self.labels.vocabulary.label_at(global_index)
+            if not class_name:
+                unmapped += 1
+                continue
+            candidates.append(
+                Detection(
+                    box_xyxy=box,
+                    confidence=confidence,
+                    class_index=int(global_index),
+                    class_name=class_name,
+                    phrase=phrase,
+                )
+            )
+        if unmapped:
+            self._stats.count("unmapped_phrase", unmapped)
+        if len(candidates) < 2:
+            return candidates
+        # A multi-class caption can return several boxes over the same region
+        # under neighbouring labels; keep the highest-confidence one per location.
+        kept = non_maximum_suppression(
+            np.asarray([d.box_xyxy for d in candidates], dtype=np.float64).reshape(-1, 4),
+            np.asarray([d.confidence for d in candidates], dtype=np.float64),
+            self._merge_iou_threshold,
         )
+        self._stats.count("merged_duplicate", max(0, len(candidates) - len(kept)))
+        return [candidates[index] for index in kept]
+
+    def _process(self, frame: Frame, models: ModelBundle) -> FrameResult:
+        started = time.monotonic()
+        detections = self._detect_vocabulary(frame.rgb, models)
         detected = time.monotonic()
         boxes = [detection.box_xyxy for detection in detections]
         masks = models.segmenter.segment(frame.rgb, boxes)
@@ -367,13 +455,20 @@ class WorkerPool:
             self._warning("SAM returned the wrong number of masks; treating all masks as invalid")
             masks = [None] * len(boxes)
         segmented = time.monotonic()
+        # The label embedding is looked up, never re-encoded, and a cache miss
+        # invalidates the detection instead of contributing a zero vector.
+        label_embeddings: list[np.ndarray | None] = []
+        for detection in detections:
+            vector = self.labels.by_index(detection.class_index)
+            if vector is None:
+                self._stats.count("label_cache_miss")
+            label_embeddings.append(vector)
         embeddings = encode_object_crops(
             frame.rgb,
             boxes,
             masks,
+            label_embeddings,
             models.clip.encode_images,
-            float(self._config["bbox_embedding_weight"]),
-            float(self._config["masked_embedding_weight"]),
             self._warning,
         )
         embedded = time.monotonic()
@@ -388,7 +483,15 @@ class WorkerPool:
                 float(self._config["max_depth_m"]),
                 frame.camera_to_world,
             )
-            proposals.append(Proposal(detection, mask, embedding, geometry))
+            proposals.append(
+                Proposal(
+                    detection,
+                    mask,
+                    embedding,
+                    geometry,
+                    mask_pixels=int(np.count_nonzero(mask)) if mask is not None else 0,
+                )
+            )
         finished = time.monotonic()
         self._stats.record_timing("detect", detected - started)
         self._stats.record_timing("segment", segmented - detected)

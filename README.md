@@ -278,26 +278,66 @@ The scene graph is exported to `<bag_path>/<scan_id>/scene_graph.json` on
 shutdown. `scene_graph_pipeline.tbot3.launch.py` is the equivalent entry point
 for the TurtleBot3 simulation topics.
 
+### Perception parameters
+
+`semantic_perception` prompts Grounding DINO with the HM3D vocabulary and
+projects object geometry into the graph frame itself:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `class_labels_path` | `models/labels/HM3D_CountsOfObjectTypes.csv` | Class vocabulary; drives prompts, `class_name`, and the cached CLIP text embeddings. |
+| `detector_vocabulary_size` | `64` | Leading vocabulary labels used for detection prompts; `0` uses all 1624. |
+| `detector_prompt_batch_size` | `16` | Labels per Grounding DINO caption. |
+| `detector_merge_iou_threshold` | `0.7` | IoU above which boxes from different prompt batches are merged. |
+| `target_frame` | `odom` | Graph frame the geometry is projected into, at the image timestamp. |
+| `tf_timeout_sec` | `0.2` | TF lookup timeout for that transform. |
+| `publish_projection_diagnostics` | `false` | Per-frame projection trace at DEBUG level. |
+
+Detection cost scales linearly with `detector_vocabulary_size`: measured on an
+RTX 5070 Ti at 640x480, 64 labels is 4 captions and ~0.89 s of detection per
+frame, 128 labels is 8 captions and ~1.38 s. The full 1624-label vocabulary would
+need 102 captions per frame (~17 s), which is not usable online.
+
+`fused_embedding` is `normalize(concat(mask_embedding, bbox_embedding,
+label_embedding))`. Each component is a unit-norm CLIP vector of dimension `D`
+(768 for ViT-L-14), so the fused vector has dimension `3D` = 2304. The mask
+embedding uses the SAM mask on a black background; the bbox embedding uses the
+unmasked detector crop; the label embedding is looked up from a cache built once
+at startup and never re-encoded per frame.
+
 ### Object association parameters
 
-`scene_graph_region` associates each incoming proposal with an existing OBJECT
-node only when both thresholds are met, and otherwise creates a new node:
+`scene_graph_region` finds OBJECT nodes near an incoming proposal and then
+decides:
 
 | Parameter | Default | Meaning |
 |---|---|---|
 | `object_proposals_topic` | `/semantic_perception/object_proposals` | `ObjectProposal3DArray` input. |
 | `proposals_qos_*` | `keep_last`/`reliable`/`volatile`/`10` | QoS for that subscription. |
-| `obj_spatial_association_threshold` | `0.75` | Maximum candidate distance, in metres. |
-| `obj_semantic_similarity_threshold` | `0.7` | Minimum cosine similarity between the proposal `fused_embedding` and the node `object_embedding`. |
-| `obj_position_update_policy` | `latest` | `latest` keeps the newest pose; `running_mean` averages associated observations. |
+| `object_spatial_association_distance` | `0.75` | Candidate search radius, in metres. |
+| `object_semantic_similarity_threshold` | `0.70` | Minimum cosine similarity between the proposal `fused_embedding` and a node's `object_embedding`. |
+| `object_position_update_policy` | `running_mean` | `running_mean` averages associated observations; `latest` keeps the newest. |
+| `object_room_boundary_tolerance` | `0.10` | Metres an object position may lie outside a DuDe region polygon and still join that room. |
 
-Each OBJECT node keeps `object_embedding` as an online, unit-norm running mean of
-its valid `fused_embedding` observations, alongside `observation_count`
-(associated detections) and `embedding_observation_count` (embeddings folded into
-the mean). The exported JSON uses schema version `1.1`; every OBJECT node carries
-`semantic.object_embedding`, `semantic.room_id`, `semantic.position`,
-`semantic.first_seen`, and the semantic-perception attributes. The legacy
-`detection_score` and `object_id` fields were removed from that schema.
+- No nearby node -> create one.
+- Nearby nodes, best cosine at or above the threshold -> update that node.
+- Nearby nodes but none similar enough -> the detection is **spatially ambiguous**
+  and no node is created. Semantic disagreement is never treated as evidence that
+  a second physical object occupies the same place.
+
+Each OBJECT node keeps `object_embedding` as `normalize(embedding_sum / count)`
+over its valid `fused_embedding` observations, plus separate
+`detection_observation_count` and `embedding_observation_count`, accumulated
+`class_evidence`, and a canonical `class_name` recomputed from that evidence.
+
+Room membership uses only the object's own position and the DuDe region polygons:
+strict containment first, then the nearest boundary within
+`object_room_boundary_tolerance`, otherwise unassigned. It is re-evaluated when
+the object moves and whenever Incremental DUDE publishes new region geometry.
+
+The exported JSON uses schema version `2.0`. See
+[`src/scene_graph_core/README.md`](src/scene_graph_core/README.md) for the object
+node schema.
 
 ## Tests
 

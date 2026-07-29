@@ -42,6 +42,71 @@ class Detection:
     box_xyxy: np.ndarray
     confidence: float
     source: str = "groundingdino"
+    # Global vocabulary index and its label. ``class_index`` is ``None`` when the
+    # detector phrase could not be mapped to exactly one vocabulary entry.
+    class_index: int | None = None
+    class_name: str = ""
+    phrase: str = ""
+
+
+def match_phrase_to_class(phrase: str, classes: Sequence[str]) -> int | None:
+    """Map one Grounding DINO phrase to a local prompt index.
+
+    An exact match wins. Otherwise the *longest* class contained in the phrase is
+    used, so a short prompt never steals a detection from a longer one that also
+    matches (upstream ``phrases2classes`` returns the first list-order match, which
+    labels an "armchair" phrase as "chair" whenever "chair" is listed first).
+
+    Longest-match also gives a deterministic result for the adjacent-concept
+    merging a single multi-class caption can produce, where the model returns a
+    phrase spanning two neighbouring classes such as "glass oil".
+    """
+    normalized = " ".join(str(phrase).split()).casefold()
+    if not normalized:
+        return None
+    best_index: int | None = None
+    best_length = 0
+    for index, name in enumerate(classes):
+        candidate = " ".join(str(name).split()).casefold()
+        if not candidate:
+            continue
+        if candidate == normalized:
+            return index
+        if candidate in normalized and len(candidate) > best_length:
+            best_index = index
+            best_length = len(candidate)
+    return best_index
+
+
+def non_maximum_suppression(
+    boxes: np.ndarray, confidences: np.ndarray, iou_threshold: float
+) -> list[int]:
+    """Return kept indices, highest confidence first, using class-agnostic IoU NMS."""
+    if boxes.size == 0:
+        return []
+    values = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    scores = np.asarray(confidences, dtype=np.float64).reshape(-1)
+    areas = np.clip(values[:, 2] - values[:, 0], 0.0, None) * np.clip(
+        values[:, 3] - values[:, 1], 0.0, None
+    )
+    # Deterministic: descending confidence, ties broken by original order.
+    order = sorted(range(len(scores)), key=lambda i: (-scores[i], i))
+    kept: list[int] = []
+    for index in order:
+        overlaps = False
+        for chosen in kept:
+            x1 = max(values[index, 0], values[chosen, 0])
+            y1 = max(values[index, 1], values[chosen, 1])
+            x2 = min(values[index, 2], values[chosen, 2])
+            y2 = min(values[index, 3], values[chosen, 3])
+            intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            union = areas[index] + areas[chosen] - intersection
+            if union > 0.0 and intersection / union > iou_threshold:
+                overlaps = True
+                break
+        if not overlaps:
+            kept.append(index)
+    return kept
 
 
 def bind_thread_to_device(device: str) -> None:
@@ -360,15 +425,41 @@ class GroundingDinoAdapter:
             raise RuntimeError(f"Failed to load GroundingDINO: {exc}") from exc
         self._torch = torch
 
-    def detect(
-        self, rgb: np.ndarray, prompt: str, box_threshold: float, text_threshold: float
-    ) -> list[Detection]:
+    def caption_token_budget(self, caption: str) -> tuple[int, int]:
+        """Return ``(tokens_in_caption, model_text_limit)`` for one caption.
+
+        A caption longer than the limit is silently truncated by the text
+        encoder, which would make the trailing classes undetectable and break the
+        prompt's local-to-global index map.
+        """
+        tokenizer = getattr(self._model.model, "tokenizer", None)
+        limit = int(getattr(self._model.model, "max_text_len", 256))
+        if tokenizer is None or not caption:
+            return 0, limit
+        return len(tokenizer(caption)["input_ids"]), limit
+
+    def detect_with_classes(
+        self,
+        rgb: np.ndarray,
+        classes: Sequence[str],
+        caption: str,
+        box_threshold: float,
+        text_threshold: float,
+    ) -> list[tuple[np.ndarray, float, int | None, str]]:
+        """Detect every class in ``caption`` in a single pass.
+
+        Returns ``(box_xyxy, confidence, local_class_index, phrase)`` tuples. The
+        local index refers to ``classes``; ``None`` means the phrase could not be
+        resolved to exactly one prompt.
+        """
+        if not classes or not caption:
+            return []
         # The official high-level GroundingDINO API accepts OpenCV/BGR input,
         # while the rest of this package deliberately uses RGB.
         with _log_warnings(self._warning), self._torch.inference_mode():
-            detections, _ = self._model.predict_with_caption(
+            detections, phrases = self._model.predict_with_caption(
                 image=np.ascontiguousarray(rgb[..., ::-1]),
-                caption=prompt,
+                caption=caption,
                 box_threshold=box_threshold,
                 text_threshold=text_threshold,
             )
@@ -376,10 +467,15 @@ class GroundingDinoAdapter:
         confidences = np.asarray(
             getattr(detections, "confidence", np.ones(len(boxes))), dtype=np.float32
         ).reshape(-1)
-        output = []
-        for box, confidence in zip(boxes, confidences):
-            if np.isfinite(box).all() and np.isfinite(confidence):
-                output.append(Detection(box, float(confidence)))
+        phrase_list = list(phrases or [])
+        output: list[tuple[np.ndarray, float, int | None, str]] = []
+        for index, (box, confidence) in enumerate(zip(boxes, confidences)):
+            if not (np.isfinite(box).all() and np.isfinite(confidence)):
+                continue
+            phrase = str(phrase_list[index]) if index < len(phrase_list) else ""
+            output.append(
+                (box, float(confidence), match_phrase_to_class(phrase, classes), phrase)
+            )
         return output
 
 

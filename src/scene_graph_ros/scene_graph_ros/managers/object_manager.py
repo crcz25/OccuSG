@@ -1,40 +1,41 @@
 """
 Object Manager - Manage semantic-perception object proposals and observation links.
 
-This manager handles the creation and tracking of OBJECT nodes in the OBJECT layer,
-representing detected objects in the environment. Observation edges are created
-during occupancy-grid-based line-of-sight updates.
+Proposals arrive already projected into the graph frame by ``semantic_perception``
+(the transform is applied at the image timestamp there), so this manager only
+validates the frame, never re-projects.
 
-Features:
-- Spatial and embedding-based object association
-- Online running-mean representation embeddings (``object_embedding``)
-- Room-scoped association through the existing ROOM_CONTAINS ownership
-- OBSERVATION_ANCHOR edge creation to poses via LoS updates
-- Thread-safe scene graph updates
-- Line-of-sight validation using occupancy-grid raycasting
+Association policy, in order:
+
+1. Collect OBJECT nodes within ``spatial_association_distance`` of the proposal.
+2. No nearby node -> create a new object node.
+3. Nearby nodes -> score each candidate's ``object_embedding`` against the
+   proposal's ``fused_embedding`` with cosine similarity.
+4. Best candidate at or above ``semantic_similarity_threshold`` -> update it.
+5. Nearby nodes but none similar enough -> the detection is *spatially ambiguous*
+   and no node is created. Semantic disagreement is never treated as evidence
+   that a second physical object occupies the same place.
 
 Usage:
     obj_mgr = ObjectNodeManager(sg_interface, logger, room_manager=room_mgr, ...)
-    obj_mgr.process_detections_update(proposals_msg, tf_buffer, room_id=room_id)
+    obj_mgr.process_detections_update(proposals_msg, room_id=room_id)
 """
 
 import math
 import time
 import traceback
 from collections import Counter
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-from geometry_msgs.msg import Pose
 from nav_msgs.msg import OccupancyGrid
-from rclpy.duration import Duration
-from rclpy.time import Time
-from tf2_geometry_msgs import do_transform_pose
 
 from scene_graph_core.algorithms.semantic import (
+    accumulate_class_evidence,
+    accumulate_embedding,
+    canonical_class_from_evidence,
     cosine_similarity,
     normalize_embedding,
-    running_mean_embedding,
 )
 from scene_graph_core.graph_interface import SceneGraphInterface
 from scene_graph_core.representation import (
@@ -47,19 +48,33 @@ from scene_graph_core.representation import (
 from scene_graph_core.services import GraphPatch
 from semantic_perception_msgs.msg import ObjectProposal3DArray
 
-# Sentinel distinguishing "no transform needed" from "transform lookup failed".
-_TRANSFORM_FAILED = object()
+
+class _Point:
+    """Minimal position holder for spatial queries, without a ROS message."""
+
+    __slots__ = ("x", "y", "z")
+
+    def __init__(self, x: float, y: float, z: float):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+
+def _as_list(vector) -> Optional[List[float]]:
+    """Return a JSON-safe list of floats, or ``None`` for a missing vector."""
+    if vector is None:
+        return None
+    return [float(value) for value in np.asarray(vector, dtype=np.float64).reshape(-1)]
 
 
 class ObjectNodeManager:
     """
     Manages OBJECT nodes representing detected objects in the OBJECT layer.
 
-    This class processes ``semantic_perception`` object proposals and associates
-    each one with an existing object node when it is both spatially close and
-    semantically similar, otherwise creating a new node. It also performs
-    occupancy-grid line-of-sight checks and writes observation edges to visible
-    objects.
+    This class turns ``semantic_perception`` proposals into OBJECT nodes, keeps a
+    sum-based embedding accumulator and accumulated class evidence on each node,
+    and performs occupancy-grid line-of-sight checks that write observation edges
+    to visible objects.
     """
 
     def __init__(
@@ -67,12 +82,13 @@ class ObjectNodeManager:
         sg_interface: SceneGraphInterface,
         logger,
         # Object association parameters
-        spatial_association_threshold: float = 0.75,  # meters
-        semantic_similarity_threshold: float = 0.7,  # cosine similarity
-        position_update_policy: str = "latest",  # "latest" or "running_mean"
+        spatial_association_distance: float = 0.75,  # metres
+        semantic_similarity_threshold: float = 0.70,  # cosine similarity
+        position_update_policy: str = "running_mean",  # "latest" or "running_mean"
         room_manager=None,
+        room_resolver: Optional[Callable[[float, float], Optional[int]]] = None,
         # Line-of-sight parameters
-        max_los_range: float = 10.0,  # meters — maximum sensing range for LoS
+        max_los_range: float = 10.0,  # metres — maximum sensing range for LoS
         los_fov_deg: float = 360.0,  # degrees — field of view (360 = omnidirectional)
         los_unknown_is_occupied: bool = False,  # treat unknown grid cells as obstacles
         # Debug logging
@@ -85,12 +101,13 @@ class ObjectNodeManager:
         Args:
             sg_interface: Shared scene graph interface for thread-safe access
             logger: ROS logger for debug/info messages
-            spatial_association_threshold: Maximum distance (m) for candidate objects
+            spatial_association_distance: Radius (m) searched for candidate objects
             semantic_similarity_threshold: Minimum cosine similarity for association
-            position_update_policy: "latest" keeps the newest observed pose,
-                "running_mean" averages the associated observations
-            room_manager: Optional RoomManager used to keep association inside one
-                room and to own the ROOM_CONTAINS attachment of new objects
+            position_update_policy: "running_mean" averages associated observations,
+                "latest" keeps the newest observed position
+            room_manager: RoomManager owning ROOM_CONTAINS attachment
+            room_resolver: Callable mapping an (x, y) graph position to a room ID,
+                or None when the position lies outside every known region
             max_los_range: Maximum sensing range (m) for line-of-sight checks
             los_fov_deg: Field-of-view angle (degrees) centred on robot heading;
                          360 means full omnidirectional visibility
@@ -102,16 +119,15 @@ class ObjectNodeManager:
         self.sg = sg_interface
         self.logger = logger
 
-        # Configuration
-        self.spatial_association_threshold = max(0.0, float(spatial_association_threshold))
+        self.spatial_association_distance = max(0.0, float(spatial_association_distance))
         self.semantic_similarity_threshold = float(semantic_similarity_threshold)
         self.position_update_policy = str(position_update_policy).strip().lower()
         self.room_manager = room_manager
+        self.room_resolver = room_resolver
         self.max_los_range = max_los_range
         self.los_fov_deg = los_fov_deg
         self.los_unknown_is_occupied = los_unknown_is_occupied
 
-        # Debug logging
         self.enable_debug_logging = enable_debug_logging
         self.debug_log_interval = debug_log_interval
         self.update_counter = 0
@@ -123,16 +139,18 @@ class ObjectNodeManager:
         self.grid_width: Optional[int] = None
         self.grid_height: Optional[int] = None
 
-        # Statistics (for monitoring)
         self.stats = {
             "total_detection_messages": 0,
             "total_detections_received": 0,
             "total_detections_accepted": 0,
             "total_detections_rejected": 0,
             "rejected_by_reason": {},
-            "total_objects_created": 0,
-            "total_objects_updated": 0,
-            "total_objects_associated": 0,
+            "objects_created": 0,
+            "objects_updated": 0,
+            "detections_spatially_ambiguous": 0,
+            "rejected_invalid_geometry": 0,
+            "rejected_invalid_embedding": 0,
+            "rejected_missing_tf": 0,
             "total_observation_edges_created": 0,
             "last_detection_stamp_sec": None,
             "last_object_create_stamp_sec": None,
@@ -142,14 +160,14 @@ class ObjectNodeManager:
 
         self.logger.debug("ObjectNodeManager initialized:")
         self.logger.debug(
-            f"  - spatial_association_threshold: {self.spatial_association_threshold}m"
+            f"  - spatial_association_distance: {self.spatial_association_distance}m"
         )
         self.logger.debug(
             f"  - semantic_similarity_threshold: {self.semantic_similarity_threshold}"
         )
         self.logger.debug(f"  - position_update_policy: {self.position_update_policy}")
         self.logger.debug(f"  - max_los_range: {self.max_los_range}m")
-        self.logger.debug(f"  - los_fov_deg: {self.los_fov_deg}°")
+        self.logger.debug(f"  - los_fov_deg: {self.los_fov_deg}\u00b0")
         self.logger.debug(
             f"  - los_unknown_is_occupied: {self.los_unknown_is_occupied}"
         )
@@ -164,7 +182,6 @@ class ObjectNodeManager:
         if pose_node.attributes is None:
             pose_node.attributes = {}
 
-        # Initialize object_in_los tracking
         if "object_in_los" not in pose_node.attributes:
             pose_node.attributes["object_in_los"] = []
 
@@ -178,14 +195,10 @@ class ObjectNodeManager:
             return
 
         self.logger.debug(f"=== ObjectNodeManager Update #{self.update_counter} ===")
+        self.logger.debug(f"  Objects created: {self.stats['objects_created']}")
+        self.logger.debug(f"  Objects updated: {self.stats['objects_updated']}")
         self.logger.debug(
-            f"  Total objects created: {self.stats['total_objects_created']}"
-        )
-        self.logger.debug(
-            f"  Total objects updated: {self.stats['total_objects_updated']}"
-        )
-        self.logger.debug(
-            f"  Total objects associated: {self.stats['total_objects_associated']}"
+            f"  Spatially ambiguous: {self.stats['detections_spatially_ambiguous']}"
         )
         self.logger.debug(
             f"  Total observation edges: {self.stats['total_observation_edges_created']}"
@@ -201,7 +214,6 @@ class ObjectNodeManager:
         Args:
             grid_msg: OccupancyGrid message
         """
-        # Store grid data as 2D numpy array
         width = grid_msg.info.width
         height = grid_msg.info.height
         data = np.array(grid_msg.data, dtype=np.int8).reshape((height, width))
@@ -222,28 +234,17 @@ class ObjectNodeManager:
     def process_detections_update(
         self,
         proposals_msg: ObjectProposal3DArray,
-        tf_buffer,
         fixed_frame_id: str = "world",
-        transform_stamped=None,
         room_id: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, object]:
         """
         Create or update objects from semantic-perception proposals.
 
-        For each proposal:
-        1. Reject malformed geometry, then transform the centroid to the fixed frame
-        2. Find nearby OBJECT nodes and score them against ``fused_embedding``
-        3. Associate with the best candidate, or create a new object node
-        4. Attach the object to the supplied room through ROOM_CONTAINS
-        5. Report newly created object IDs for derived nearest-link maintenance
-
         Args:
-            proposals_msg: ObjectProposal3DArray published by semantic_perception
-            tf_buffer: TF2 buffer for coordinate transforms
-            fixed_frame_id: Target frame for object poses (default: "world")
-            transform_stamped: Optional pre-fetched transform from proposal frame
-                to fixed frame. Supplying this avoids TF lookups inside SG critical sections.
-            room_id: Room that currently owns newly observed objects, when known
+            proposals_msg: ObjectProposal3DArray already expressed in the graph frame
+            fixed_frame_id: Graph frame the proposals must be published in
+            room_id: Room owning the current viewpoint, used only as a fallback when
+                no region-based resolver is configured
 
         Returns:
             Dictionary with update statistics
@@ -261,16 +262,21 @@ class ObjectNodeManager:
         self.stats["total_detections_received"] += detection_count
 
         header = getattr(proposals_msg, "header", None)
-        detection_frame = str(getattr(header, "frame_id", "") or "")
-        transform_stamped = self._resolve_transform(
-            tf_buffer, detection_frame, fixed_frame_id, transform_stamped
-        )
-        if transform_stamped is _TRANSFORM_FAILED:
-            self._record_detection_rejection("tf_lookup_failed", detection_count)
+        proposal_frame = str(getattr(header, "frame_id", "") or "")
+        if proposal_frame != str(fixed_frame_id):
+            # semantic_perception publishes in the graph frame; anything else
+            # would mean comparing coordinates from two different frames.
+            self.stats["rejected_missing_tf"] += detection_count
             self.stats["total_detections_rejected"] += detection_count
+            self._record_detection_rejection("frame_mismatch", detection_count)
+            self.logger.warning(
+                f"[object_proposals] rejected message: frame {proposal_frame!r} "
+                f"is not the graph frame {fixed_frame_id!r}",
+                throttle_duration_sec=5.0,
+            )
             return self._empty_update_stats(
                 rejected=detection_count,
-                rejected_by_reason={"tf_lookup_failed": detection_count},
+                rejected_by_reason={"frame_mismatch": detection_count},
             )
 
         timestamp = self._message_timestamp(header)
@@ -278,33 +284,35 @@ class ObjectNodeManager:
 
         new_objects = 0
         updated_objects = 0
+        ambiguous_detections = 0
         accepted_detections = 0
         rejected_by_reason = Counter()
         new_object_ids: List[int] = []
         updated_object_ids: List[int] = []
 
         for detection_index, proposal in enumerate(proposals):
-            obj_node, is_new, reason = self._process_single_detection(
+            obj_node, outcome = self._process_single_detection(
                 proposal,
                 timestamp,
-                transform_stamped,
                 detection_index=detection_index,
                 room_id=room_id,
             )
 
-            if obj_node is None:
-                rejected_by_reason[str(reason or "unknown")] += 1
-                continue
-
-            accepted_detections += 1
-            if is_new:
+            if outcome == "created":
+                accepted_detections += 1
                 new_objects += 1
-                if obj_node.id is not None:
+                if obj_node is not None and obj_node.id is not None:
                     new_object_ids.append(int(obj_node.id))
-            else:
+            elif outcome == "updated":
+                accepted_detections += 1
                 updated_objects += 1
-                if obj_node.id is not None:
+                if obj_node is not None and obj_node.id is not None:
                     updated_object_ids.append(int(obj_node.id))
+            elif outcome == "spatially_ambiguous":
+                ambiguous_detections += 1
+                rejected_by_reason["spatially_ambiguous"] += 1
+            else:
+                rejected_by_reason[str(outcome or "unknown")] += 1
 
         rejected_detections = int(sum(rejected_by_reason.values()))
         self.stats["total_detections_accepted"] += accepted_detections
@@ -320,13 +328,13 @@ class ObjectNodeManager:
             "rejected_by_reason": dict(rejected_by_reason),
             "new_objects": new_objects,
             "updated_objects": updated_objects,
+            "ambiguous_detections": ambiguous_detections,
             "new_object_ids": new_object_ids,
             "updated_object_ids": updated_object_ids,
             "object_count": len(self.sg.query.find_nodes_by_type(NodeType.OBJECT)),
         }
 
         self._log_update_stats(detection_count, new_objects)
-
         return result_stats
 
     def _empty_update_stats(
@@ -344,39 +352,10 @@ class ObjectNodeManager:
             "rejected_by_reason": dict(rejected_by_reason or {}),
             "new_objects": 0,
             "updated_objects": 0,
+            "ambiguous_detections": 0,
             "new_object_ids": [],
             "updated_object_ids": [],
         }
-
-    def _resolve_transform(
-        self,
-        tf_buffer,
-        detection_frame: str,
-        fixed_frame_id: str,
-        transform_stamped,
-    ):
-        """Resolve the proposal-frame transform, or the failure sentinel."""
-        if (
-            transform_stamped is not None
-            or not detection_frame
-            or detection_frame == fixed_frame_id
-        ):
-            return transform_stamped
-
-        try:
-            return tf_buffer.lookup_transform(
-                fixed_frame_id,  # target frame
-                detection_frame,  # source frame (camera/sensor frame)
-                Time(),  # Get latest available transform
-                Duration(seconds=1),  # timeout
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "[object_proposals] TF lookup failed "
-                f"{detection_frame}->{fixed_frame_id}: {exc}",
-                throttle_duration_sec=5.0,
-            )
-            return _TRANSFORM_FAILED
 
     @staticmethod
     def _message_timestamp(header) -> float:
@@ -401,19 +380,6 @@ class ObjectNodeManager:
             return
         self._rejected_by_reason[reason] += count
         self.stats["rejected_by_reason"] = dict(self._rejected_by_reason)
-
-    def _is_finite_pose(self, pose: Pose) -> bool:
-        """Return True if a pose contains finite position and orientation values."""
-        values = (
-            pose.position.x,
-            pose.position.y,
-            pose.position.z,
-            pose.orientation.x,
-            pose.orientation.y,
-            pose.orientation.z,
-            pose.orientation.w,
-        )
-        return all(math.isfinite(float(value)) for value in values)
 
     @staticmethod
     def _is_finite(value) -> bool:
@@ -440,340 +406,355 @@ class ObjectNodeManager:
         self,
         proposal,
         timestamp: float,
-        transform_stamped,
         detection_index: int = 0,
         room_id: Optional[int] = None,
-    ) -> Tuple[Optional[BaseNode], bool, Optional[str]]:
+    ) -> Tuple[Optional[BaseNode], str]:
         """Process one ``semantic_perception_msgs/ObjectProposal3D``.
 
         Returns:
-            Tuple of (object_node, is_new, rejection_reason). ``object_node`` is
-            ``None`` when the proposal was rejected.
+            Tuple of (object_node, outcome) where outcome is one of ``created``,
+            ``updated``, ``spatially_ambiguous``, or a rejection reason.
         """
-        detection_confidence = self._finite_scalar(
-            getattr(proposal, "detection_confidence", None)
-        )
-        if detection_confidence is None:
+        confidence = self._finite_scalar(getattr(proposal, "detection_confidence", None))
+        if confidence is None:
+            self.stats["rejected_invalid_geometry"] += 1
             self.logger.warning(
-                "[object_proposals] rejected proposal "
-                f"idx={detection_index}: nonfinite_detection_confidence",
+                f"[object_proposals] rejected idx={detection_index}: "
+                "nonfinite_detection_confidence",
                 throttle_duration_sec=5.0,
             )
-            return None, False, "nonfinite_detection_confidence"
+            return None, "nonfinite_detection_confidence"
 
         if not bool(getattr(proposal, "valid_3d", False)):
+            self.stats["rejected_invalid_geometry"] += 1
             self.logger.warning(
-                "[object_proposals] rejected proposal "
-                f"idx={detection_index}: invalid_3d_geometry",
+                f"[object_proposals] rejected idx={detection_index}: invalid_3d_geometry",
                 throttle_duration_sec=5.0,
             )
-            return None, False, "invalid_3d_geometry"
+            return None, "invalid_3d_geometry"
 
         centroid = getattr(proposal, "centroid_3d", None)
         if centroid is None or not all(
             self._is_finite(getattr(centroid, axis, None)) for axis in ("x", "y", "z")
         ):
+            self.stats["rejected_invalid_geometry"] += 1
             self.logger.warning(
-                "[object_proposals] rejected proposal "
-                f"idx={detection_index}: nonfinite_centroid",
+                f"[object_proposals] rejected idx={detection_index}: nonfinite_centroid",
                 throttle_duration_sec=5.0,
             )
-            return None, False, "nonfinite_centroid"
+            return None, "nonfinite_centroid"
 
-        # semantic_perception reports object geometry as a 3D centroid; the graph
-        # keeps object orientation identity because proposals are axis-agnostic.
-        det_ps = Pose()
-        det_ps.position.x = float(centroid.x)
-        det_ps.position.y = float(centroid.y)
-        det_ps.position.z = float(centroid.z)
-        det_ps.orientation.w = 1.0
+        position = (float(centroid.x), float(centroid.y), float(centroid.z))
 
-        if transform_stamped is None:
-            world_ps = det_ps
-        else:
-            try:
-                world_ps = do_transform_pose(det_ps, transform_stamped)
-            except Exception as exc:
-                self.logger.warning(
-                    "[object_proposals] rejected proposal "
-                    f"idx={detection_index}: transform_failed: {exc}",
-                    throttle_duration_sec=5.0,
-                )
-                return None, False, "transform_failed"
-
-        if world_ps is None or not self._is_finite_pose(world_ps):
+        fused_embedding = normalize_embedding(getattr(proposal, "fused_embedding", None))
+        if fused_embedding is None:
+            self.stats["rejected_invalid_embedding"] += 1
             self.logger.warning(
-                "[object_proposals] rejected proposal "
-                f"idx={detection_index}: invalid_world_pose",
+                f"[object_proposals] rejected idx={detection_index}: invalid_fused_embedding",
                 throttle_duration_sec=5.0,
             )
-            return None, False, "invalid_world_pose"
+            return None, "invalid_fused_embedding"
 
-        incoming_embedding = normalize_embedding(
-            getattr(proposal, "fused_embedding", None)
-        )
+        class_name = " ".join(str(getattr(proposal, "class_name", "") or "").split())
+        if not class_name:
+            self.stats["rejected_invalid_embedding"] += 1
+            self.logger.warning(
+                f"[object_proposals] rejected idx={detection_index}: missing_class_name",
+                throttle_duration_sec=5.0,
+            )
+            return None, "missing_class_name"
 
-        node = ObjectNode()  # ID will be assigned by graph
-        node.pose.position.x = world_ps.position.x
-        node.pose.position.y = world_ps.position.y
-        node.pose.position.z = world_ps.position.z
-        node.pose.orientation.x = world_ps.orientation.x
-        node.pose.orientation.y = world_ps.orientation.y
-        node.pose.orientation.z = world_ps.orientation.z
-        node.pose.orientation.w = world_ps.orientation.w
-        node.created_at = timestamp
-        node.last_seen = timestamp
-        node.attributes = self._proposal_attributes(proposal, incoming_embedding)
+        target_room_id = self._resolve_room_id(position, room_id)
 
         try:
-            merged_node, is_new, similarity = self._find_or_add(
-                node,
-                incoming_embedding=incoming_embedding,
-                range_m=self.spatial_association_threshold,
-                room_id=room_id,
+            candidates = self._find_candidates(position, target_room_id)
+            match, similarity = self._select_best_candidate(
+                candidates, fused_embedding
             )
         except Exception as exc:
             self.logger.error(
-                "[object_proposals] rejected proposal "
-                f"idx={detection_index}: graph_mutation_failed: "
-                f"{exc}\n{traceback.format_exc()}"
+                f"[object_proposals] rejected idx={detection_index}: "
+                f"graph_query_failed: {exc}\n{traceback.format_exc()}"
             )
-            return None, False, "graph_mutation_failed"
+            return None, "graph_query_failed"
 
-        attributes = (
-            merged_node.attributes if isinstance(merged_node.attributes, dict) else {}
-        )
-        merged_node.attributes = attributes
+        try:
+            if match is not None:
+                node = self._update_object_node(
+                    match, proposal, position, fused_embedding, class_name,
+                    confidence, timestamp, similarity,
+                )
+                outcome = "updated"
+            elif candidates:
+                # Nearby objects exist but none is semantically compatible. This
+                # is ambiguity, not evidence of a second object at the same place.
+                self.stats["detections_spatially_ambiguous"] += 1
+                self.logger.debug(
+                    f"[object_proposals] ambiguous idx={detection_index} "
+                    f"class={class_name!r} candidates={len(candidates)} "
+                    f"best_similarity={similarity} "
+                    f"threshold={self.semantic_similarity_threshold}",
+                    throttle_duration_sec=5.0,
+                )
+                return None, "spatially_ambiguous"
+            else:
+                node = self._create_object_node(
+                    proposal, position, fused_embedding, class_name,
+                    confidence, timestamp,
+                )
+                outcome = "created"
+        except Exception as exc:
+            self.logger.error(
+                f"[object_proposals] rejected idx={detection_index}: "
+                f"graph_mutation_failed: {exc}\n{traceback.format_exc()}"
+            )
+            return None, "graph_mutation_failed"
 
-        if is_new:
-            # ``_proposal_attributes`` already seeded object_embedding and its
-            # observation count for the first observation.
-            attributes.setdefault("observation_count", 1)
-            self.stats["total_objects_created"] += 1
+        self.sg.update.update_node(node.id, node)
+        self._attach_to_room(node, target_room_id)
+
+        if outcome == "created":
+            self.stats["objects_created"] += 1
             self.stats["last_object_create_stamp_sec"] = timestamp
             self.logger.debug(
-                "[object_proposals] accepted proposal "
-                f"idx={detection_index} action=create object_id={merged_node.id} "
-                f"world=({merged_node.pose.position.x:.2f}, "
-                f"{merged_node.pose.position.y:.2f}, "
-                f"{merged_node.pose.position.z:.2f})"
+                f"[object_proposals] created idx={detection_index} "
+                f"object_id={node.id} class={class_name!r} room={target_room_id} "
+                f"position=({position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f})"
             )
         else:
-            # ``observation_count`` counts detections folded into this node;
-            # ``embedding_observation_count`` counts only the valid embeddings
-            # that contributed to the running mean, so the two can diverge.
-            previous_observations = self._nonnegative_int(
-                attributes.get("observation_count"), default=0
-            )
-            updated_embedding, updated_embedding_count = running_mean_embedding(
-                attributes.get("object_embedding"),
-                self._nonnegative_int(
-                    attributes.get("embedding_observation_count"), default=0
-                ),
-                incoming_embedding,
-            )
-            attributes["object_embedding"] = (
-                updated_embedding.astype(np.float32).tolist()
-                if updated_embedding is not None
-                else None
-            )
-            attributes["embedding_observation_count"] = updated_embedding_count
-            attributes["observation_count"] = previous_observations + 1
-            attributes.update(
-                self._proposal_attributes(
-                    proposal, incoming_embedding, only_present=True
-                )
-            )
-            if similarity is not None:
-                attributes["last_semantic_similarity"] = float(similarity)
-
-            self._update_spatial_representation(
-                merged_node, world_ps, previous_observations
-            )
-            merged_node.last_seen = timestamp
-            self.stats["total_objects_updated"] += 1
+            self.stats["objects_updated"] += 1
             self.stats["last_object_update_stamp_sec"] = timestamp
             self.logger.debug(
-                "[object_proposals] accepted proposal "
-                f"idx={detection_index} action=update object_id={merged_node.id} "
-                f"similarity={similarity} "
-                f"world=({world_ps.position.x:.2f}, "
-                f"{world_ps.position.y:.2f}, "
-                f"{world_ps.position.z:.2f})"
+                f"[object_proposals] updated idx={detection_index} "
+                f"object_id={node.id} class={class_name!r} room={target_room_id} "
+                f"similarity={similarity:.3f} "
+                f"position=({position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f})"
             )
+        return node, outcome
 
-        self.sg.update.update_node(merged_node.id, merged_node)
+    def _resolve_room_id(
+        self,
+        position: Tuple[float, float, float],
+        fallback_room_id: Optional[int],
+    ) -> Optional[int]:
+        """Resolve the owning room from region polygons at this position."""
+        if self.room_resolver is not None:
+            return self.room_resolver(position[0], position[1])
+        return fallback_room_id
 
-        if room_id is not None and self.room_manager is not None:
-            self.room_manager.attach_direct_member_to_room(
-                int(room_id),
-                int(merged_node.id),
-                allow_reassignment=True,
-                reason="semantic_perception_proposal",
-            )
+    def _find_candidates(
+        self,
+        position: Tuple[float, float, float],
+        room_id: Optional[int],
+    ) -> List[Tuple[BaseNode, float]]:
+        """Return nearby OBJECT nodes eligible for association, nearest first."""
+        query = _Point(*position)
+        nearby = self.sg.query.find_nodes_by_position_xyz(
+            query, self.spatial_association_distance, node_type=NodeType.OBJECT
+        )
+        candidates: List[Tuple[BaseNode, float]] = []
+        for node, distance in nearby:
+            if node is None or node.id is None or node.layer != ObjectNode().layer:
+                continue
+            if not self._has_valid_geometry(node):
+                continue
+            if not self._room_is_compatible(node, room_id):
+                continue
+            candidates.append((node, float(distance)))
+        candidates.sort(key=lambda item: (item[1], int(item[0].id)))
+        return candidates
 
-        return merged_node, is_new, None
+    @staticmethod
+    def _has_valid_geometry(node: BaseNode) -> bool:
+        position = getattr(getattr(node, "pose", None), "position", None)
+        if position is None:
+            return False
+        return all(
+            ObjectNodeManager._is_finite(getattr(position, axis, None))
+            for axis in ("x", "y", "z")
+        )
 
-    def _proposal_attributes(
+    def _room_is_compatible(self, node: BaseNode, room_id: Optional[int]) -> bool:
+        """Objects only associate inside one room, or when neither has a room."""
+        candidate_room_id = self._room_id_for_object(node)
+        if room_id is None:
+            return candidate_room_id is None
+        return candidate_room_id is None or int(candidate_room_id) == int(room_id)
+
+    def _select_best_candidate(
+        self,
+        candidates: List[Tuple[BaseNode, float]],
+        fused_embedding: np.ndarray,
+    ) -> Tuple[Optional[BaseNode], Optional[float]]:
+        """Return the best semantically compatible candidate and its similarity.
+
+        Ranking is highest cosine similarity, then smaller spatial distance, then
+        lower node ID. Candidates whose stored embedding is missing or of another
+        dimension score ``None`` and can never win.
+        """
+        best_node: Optional[BaseNode] = None
+        best_similarity: Optional[float] = None
+        best_key: Optional[Tuple[float, float, int]] = None
+        observed_best: Optional[float] = None
+
+        for node, distance in candidates:
+            stored = (node.attributes or {}).get("object_embedding")
+            similarity = cosine_similarity(fused_embedding, stored)
+            if similarity is None:
+                continue
+            if observed_best is None or similarity > observed_best:
+                observed_best = similarity
+            if similarity < self.semantic_similarity_threshold:
+                continue
+            key = (-float(similarity), float(distance), int(node.id))
+            if best_key is None or key < best_key:
+                best_node = node
+                best_similarity = float(similarity)
+                best_key = key
+
+        if best_node is not None:
+            return best_node, best_similarity
+        return None, observed_best
+
+    def _create_object_node(
         self,
         proposal,
-        embedding: Optional[np.ndarray],
-        *,
-        only_present: bool = False,
-    ) -> Dict[str, object]:
-        """Convert message metadata to stable, JSON-safe object attributes.
+        position: Tuple[float, float, float],
+        fused_embedding: np.ndarray,
+        class_name: str,
+        confidence: float,
+        timestamp: float,
+    ) -> BaseNode:
+        """Insert a new OBJECT node seeded from one proposal."""
+        node = ObjectNode()
+        node.pose.position.x = position[0]
+        node.pose.position.y = position[1]
+        node.pose.position.z = position[2]
+        node.pose.orientation.w = 1.0
+        node.created_at = timestamp
+        node.last_seen = timestamp
 
-        With ``only_present`` the result omits fields the proposal left blank so
-        an update never overwrites richer state already stored on the node.
-        """
-        attributes: Dict[str, object] = {}
+        embedding_sum, embedding_count, mean = accumulate_embedding(
+            None, 0, fused_embedding
+        )
+        evidence = accumulate_class_evidence(None, class_name, confidence)
+        canonical_name, canonical_confidence = canonical_class_from_evidence(evidence)
 
-        class_name = str(getattr(proposal, "class_name", "") or "").strip()
-        if class_name or not only_present:
-            attributes["class_name"] = class_name
-        class_id = self._nonnegative_int(getattr(proposal, "class_id", 0), default=0)
-        if class_id or not only_present:
-            attributes["class_id"] = class_id
-        detector_source = str(getattr(proposal, "detector_source", "") or "").strip()
-        if detector_source or not only_present:
-            attributes["detector_source"] = detector_source
+        node.attributes = {
+            "class_name": canonical_name or class_name,
+            "class_confidence": canonical_confidence,
+            "class_evidence": evidence,
+            "detection_observation_count": 1,
+            "embedding_observation_count": int(embedding_count),
+            "embedding_sum": _as_list(embedding_sum),
+            "object_embedding": _as_list(mean),
+            "first_seen": timestamp,
+        }
+        node.attributes.update(self._canonical_components(proposal))
+        node.id = self.sg.update.add_node(node)
+        return node
 
-        attributes["detection_confidence"] = self._finite_scalar(
+    def _update_object_node(
+        self,
+        node: BaseNode,
+        proposal,
+        position: Tuple[float, float, float],
+        fused_embedding: np.ndarray,
+        class_name: str,
+        confidence: float,
+        timestamp: float,
+        similarity: Optional[float],
+    ) -> BaseNode:
+        """Fold one proposal into an existing OBJECT node."""
+        attributes = node.attributes if isinstance(node.attributes, dict) else {}
+        node.attributes = attributes
+
+        detection_count = self._nonnegative_int(
+            attributes.get("detection_observation_count"), default=0
+        )
+        embedding_count = self._nonnegative_int(
+            attributes.get("embedding_observation_count"), default=0
+        )
+        embedding_sum, embedding_count, mean = accumulate_embedding(
+            attributes.get("embedding_sum"), embedding_count, fused_embedding
+        )
+
+        evidence = accumulate_class_evidence(
+            attributes.get("class_evidence"), class_name, confidence
+        )
+        canonical_name, canonical_confidence = canonical_class_from_evidence(evidence)
+
+        attributes["detection_observation_count"] = detection_count + 1
+        attributes["embedding_observation_count"] = int(embedding_count)
+        attributes["embedding_sum"] = _as_list(embedding_sum)
+        attributes["object_embedding"] = _as_list(mean)
+        attributes["class_evidence"] = evidence
+        attributes["class_name"] = canonical_name or class_name
+        attributes["class_confidence"] = canonical_confidence
+        attributes.setdefault("first_seen", node.created_at)
+        if similarity is not None:
+            attributes["last_semantic_similarity"] = float(similarity)
+
+        # The canonical CLIP components come from an observation of the canonical
+        # class, so they never describe a class the node was not resolved to.
+        if class_name == attributes["class_name"]:
+            attributes.update(self._canonical_components(proposal))
+
+        self._update_spatial_representation(node, position, detection_count)
+        node.last_seen = timestamp
+        return node
+
+    def _canonical_components(self, proposal) -> Dict[str, object]:
+        """Return the per-observation CLIP components kept on the node."""
+        components: Dict[str, object] = {}
+        for name in ("mask_embedding", "bbox_embedding", "label_embedding", "fused_embedding"):
+            vector = normalize_embedding(getattr(proposal, name, None))
+            components[name] = _as_list(vector)
+        components["detection_confidence"] = self._finite_scalar(
             getattr(proposal, "detection_confidence", None)
         )
-        for name in ("similarity_score", "entropy_score"):
-            score = self._finite_scalar(getattr(proposal, name, None))
-            attributes[name] = 0.0 if score is None else score
-        attributes["semantic_perception_id"] = self._nonnegative_int(
-            getattr(proposal, "id", 0), default=0
+        components["detector_source"] = str(
+            getattr(proposal, "detector_source", "") or ""
         )
-        attributes["valid_3d"] = bool(getattr(proposal, "valid_3d", False))
-
-        if not only_present:
-            attributes["object_embedding"] = (
-                embedding.astype(np.float32).tolist() if embedding is not None else None
-            )
-            attributes["embedding_observation_count"] = 1 if embedding is not None else 0
-
+        components["semantic_perception_class_id"] = self._nonnegative_int(
+            getattr(proposal, "class_id", 0), default=0
+        )
         size = getattr(getattr(proposal, "bbox_3d", None), "size", None)
         if size is not None and all(
             self._is_finite(getattr(size, axis, None)) for axis in ("x", "y", "z")
         ):
-            attributes["bbox_3d_size"] = [
-                float(size.x),
-                float(size.y),
-                float(size.z),
-            ]
-
-        return attributes
+            components["bbox_3d_size"] = [float(size.x), float(size.y), float(size.z)]
+        return components
 
     def _update_spatial_representation(
         self,
         node: BaseNode,
-        world_pose: Pose,
+        position: Tuple[float, float, float],
         previous_observations: int,
     ) -> None:
-        """Fold one observed pose into the node using the configured policy."""
+        """Fold one observed position into the node using the configured policy."""
         if self.position_update_policy == "running_mean" and previous_observations > 0:
             weight = 1.0 / float(previous_observations + 1)
-            node.pose.position.x += weight * (
-                float(world_pose.position.x) - float(node.pose.position.x)
-            )
-            node.pose.position.y += weight * (
-                float(world_pose.position.y) - float(node.pose.position.y)
-            )
-            node.pose.position.z += weight * (
-                float(world_pose.position.z) - float(node.pose.position.z)
-            )
+            node.pose.position.x += weight * (position[0] - float(node.pose.position.x))
+            node.pose.position.y += weight * (position[1] - float(node.pose.position.y))
+            node.pose.position.z += weight * (position[2] - float(node.pose.position.z))
         else:
-            node.pose.position.x = world_pose.position.x
-            node.pose.position.y = world_pose.position.y
-            node.pose.position.z = world_pose.position.z
+            node.pose.position.x = position[0]
+            node.pose.position.y = position[1]
+            node.pose.position.z = position[2]
 
-        node.pose.orientation.x = world_pose.orientation.x
-        node.pose.orientation.y = world_pose.orientation.y
-        node.pose.orientation.z = world_pose.orientation.z
-        node.pose.orientation.w = world_pose.orientation.w
-
-    def _find_or_add(
-        self,
-        node: BaseNode,
-        incoming_embedding: Optional[np.ndarray] = None,
-        range_m: float = 0.75,
-        room_id: Optional[int] = None,
-    ) -> Tuple[BaseNode, bool, Optional[float]]:
-        """Associate by distance and cosine similarity, or insert a new node.
-
-        A candidate is only accepted when it lies within ``range_m``, belongs to
-        the same room as the incoming observation, and its stored
-        ``object_embedding`` reaches ``semantic_similarity_threshold``. The best
-        candidate is the most similar one, ties broken by distance then node ID.
-
-        Returns:
-            Tuple of (node, is_new, similarity). ``similarity`` is ``None`` for
-            newly created nodes.
-        """
-        candidates_with_dist = self.sg.query.find_nodes_by_position_xyz(
-            node.pose.position, range_m, node_type=node.node_type
-        )
-
-        best_candidate: Optional[BaseNode] = None
-        best_similarity: Optional[float] = None
-        best_distance = float("inf")
-        best_id = float("inf")
-
-        for candidate_node, distance in candidates_with_dist:
-            if candidate_node.layer != node.layer:
-                continue
-            if not self._candidate_is_in_room(candidate_node, room_id):
-                continue
-
-            similarity = cosine_similarity(
-                incoming_embedding,
-                (candidate_node.attributes or {}).get("object_embedding"),
-            )
-            # Missing or dimensionally inconsistent embeddings never associate.
-            if similarity is None or similarity < self.semantic_similarity_threshold:
-                continue
-
-            candidate_id = (
-                int(candidate_node.id) if candidate_node.id is not None else -1
-            )
-            candidate_distance = float(distance)
-
-            if (
-                best_candidate is None
-                or similarity > float(best_similarity)
-                or (
-                    math.isclose(similarity, float(best_similarity), rel_tol=1e-12)
-                    and (candidate_distance, candidate_id) < (best_distance, best_id)
-                )
-            ):
-                best_candidate = candidate_node
-                best_similarity = float(similarity)
-                best_distance = candidate_distance
-                best_id = candidate_id
-
-        if best_candidate is not None:
-            self.stats["total_objects_associated"] += 1
-            return best_candidate, False, best_similarity
-
-        node_id = self.sg.update.add_node(node)
-        node.id = node_id  # Update node with assigned ID
-        return node, True, None
-
-    def _candidate_is_in_room(
-        self,
-        candidate_node: BaseNode,
-        incoming_room_id: Optional[int],
-    ) -> bool:
-        """Keep association candidates within one explicit room transition."""
-        candidate_room_id = self._room_id_for_object(candidate_node)
-        if incoming_room_id is None:
-            return candidate_room_id is None
-        return (
-            candidate_room_id is None
-            or int(candidate_room_id) == int(incoming_room_id)
+    def _attach_to_room(self, node: BaseNode, room_id: Optional[int]) -> None:
+        """Attach or detach the object's single ROOM_CONTAINS ownership edge."""
+        if self.room_manager is None or node.id is None:
+            return
+        if room_id is None:
+            self.room_manager.detach_direct_member_from_rooms(int(node.id))
+            return
+        self.room_manager.attach_direct_member_to_room(
+            int(room_id),
+            int(node.id),
+            allow_reassignment=True,
+            reason="semantic_perception_proposal",
         )
 
     def _room_id_for_object(self, object_node: BaseNode) -> Optional[int]:

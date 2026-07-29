@@ -55,39 +55,62 @@ def cosine_similarity(
     return score if np.isfinite(score) else None
 
 
-def running_mean_embedding(
-    old_embedding: Optional[Sequence[float]],
+def _finite_vector(values: Optional[Sequence[float]]) -> Optional[np.ndarray]:
+    """Return a finite 1-D float array, or ``None`` when unusable."""
+    if values is None:
+        return None
+    try:
+        value = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if value.ndim != 1 or value.size == 0 or not np.isfinite(value).all():
+        return None
+    return value
+
+
+def accumulate_embedding(
+    embedding_sum: Optional[Sequence[float]],
     observation_count: int,
     new_embedding: Optional[Sequence[float]],
-) -> tuple[Optional[np.ndarray], int]:
-    """Add one valid observation to an embedding running mean.
+) -> tuple[Optional[np.ndarray], int, Optional[np.ndarray]]:
+    """Fold one observation into an embedding sum accumulator.
 
-    Invalid new observations leave the representation and count unchanged.
-    A missing/invalid old representation is safely re-seeded from the new
-    observation.  Dimension mismatches are treated as an incompatible old
-    representation and also re-seed the running mean.
+    The accumulator stores the raw sum of unit-norm observations, so the mean is
+    exact at every step and never drifts through repeated re-normalization.
+
+    Invalid new observations leave the accumulator and count unchanged. A missing,
+    invalid, or dimensionally inconsistent accumulator is re-seeded from the new
+    observation.
 
     Returns:
-        Tuple of (updated unit-norm embedding, updated observation count).
+        Tuple of (embedding sum, observation count, normalized mean). The mean is
+        ``None`` only when the accumulator holds no usable direction.
     """
     new_normalized = normalize_embedding(new_embedding)
     if new_normalized is None:
-        return normalize_embedding(old_embedding), _nonnegative_count(
-            observation_count
+        current = _finite_vector(embedding_sum)
+        return (
+            current,
+            _nonnegative_count(observation_count),
+            normalize_embedding(current),
         )
 
     count = _nonnegative_count(observation_count)
-    old_normalized = normalize_embedding(old_embedding)
-    if (
-        old_normalized is None
-        or count == 0
-        or old_normalized.shape != new_normalized.shape
-    ):
-        return new_normalized, 1
+    current = _finite_vector(embedding_sum)
+    if current is None or count == 0 or current.shape != new_normalized.shape:
+        updated = new_normalized.astype(np.float64)
+        return updated, 1, normalize_embedding(updated)
 
-    mean = (count * old_normalized.astype(np.float64) + new_normalized) / (count + 1)
-    normalized_mean = normalize_embedding(mean)
-    if normalized_mean is None:
-        # Opposing observations can cancel out; keep the previous representation.
-        return old_normalized, count
-    return normalized_mean, count + 1
+    updated = current + new_normalized.astype(np.float64)
+    return updated, count + 1, normalize_embedding(updated)
+
+
+def mean_embedding(
+    embedding_sum: Optional[Sequence[float]],
+    observation_count: int,
+) -> Optional[np.ndarray]:
+    """Return the unit-norm mean of an embedding sum accumulator."""
+    current = _finite_vector(embedding_sum)
+    if current is None or _nonnegative_count(observation_count) <= 0:
+        return None
+    return normalize_embedding(current / float(_nonnegative_count(observation_count)))

@@ -556,15 +556,35 @@ class RoomManager:
         self,
         room_node_id: int,
         member_ids: Dict[NodeType, set[int]],
+        *,
+        managed_types: Optional[Iterable[NodeType]] = None,
     ) -> Dict[str, int]:
-        """Refresh direct ROOM_CONTAINS members from geometry-filtered region members."""
+        """Refresh direct ROOM_CONTAINS members from geometry-filtered region members.
+
+        ``managed_types`` restricts which node types this sync owns. OBJECT
+        membership is excluded by the region pipeline because objects are assigned
+        from their own position by the object room resolver.
+        """
         room_id = int(room_node_id)
-        keep_ids = set().union(*member_ids.values()) if member_ids else set()
+        managed = tuple(
+            managed_types if managed_types is not None else self.DIRECT_MEMBER_TYPES
+        )
+        keep_ids = (
+            set().union(*(member_ids.get(node_type, set()) for node_type in managed))
+            if managed
+            else set()
+        )
         stats = {"assigned": 0, "removed": 0}
 
         patch = GraphPatch()
-        current_direct_members = self.get_attached_direct_member_ids(room_id)
-        current_keep_ids = set().union(*current_direct_members.values())
+        current_direct_members = self.get_attached_direct_member_ids(
+            room_id, node_types=managed
+        )
+        current_keep_ids = (
+            set().union(*current_direct_members.values())
+            if current_direct_members
+            else set()
+        )
         for node_id in current_keep_ids - keep_ids:
             patch.remove_edge(room_id, int(node_id), EdgeType.ROOM_CONTAINS)
             for members in self.room_to_direct_members.setdefault(
@@ -579,7 +599,7 @@ class RoomManager:
         if not patch.is_empty():
             self.sg.update.apply_patch(patch, validate=False)
 
-        for node_type in self.DIRECT_MEMBER_TYPES:
+        for node_type in managed:
             for node_id in sorted(member_ids.get(node_type, set())):
                 if self.attach_direct_member_to_room(
                     room_id,
@@ -631,6 +651,10 @@ class RoomManager:
             node_type: set(direct_members.get(node_type, set()))
             for node_type in tracked_types
         }
+
+    def detach_direct_member_from_rooms(self, node_id: int) -> set[int]:
+        """Remove one node's room ownership entirely, leaving it unassigned."""
+        return self._detach_direct_member_from_rooms(node_id)
 
     def _detach_direct_member_from_rooms(self, node_id: int) -> set[int]:
         """Remove any direct ROOM_CONTAINS ownership edges into one member node."""
