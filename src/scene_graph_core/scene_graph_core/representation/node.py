@@ -4,6 +4,7 @@ from time import time
 from typing import Any, Dict, Optional
 
 from .geometry import Pose
+from .object_schema import OBJECT_ATTRIBUTE_GROUPS, validate_object_attributes
 
 
 class NodeLayer(Enum):
@@ -27,6 +28,11 @@ class NodeLayer(Enum):
         except KeyError:
             raise ValueError(f"Invalid node type: '{s}'. Must be one of {list(cls)}.")
 
+    @property
+    def collection_key(self) -> str:
+        """Return the conventional JSON key for this enum member."""
+        return f"{self.value.lower()}_nodes"
+
 
 class NodeType(Enum):
     AGENT = "AGENT"
@@ -45,6 +51,41 @@ class NodeType(Enum):
             return cls[s.upper()]
         except KeyError:
             raise ValueError(f"Invalid node type: '{s}'. Must be one of {list(cls)}.")
+
+    @property
+    def collection_key(self) -> str:
+        """Return the JSON node collection key derived from this enum value."""
+        return f"{self.value.lower()}_nodes"
+
+    @classmethod
+    def from_collection_key(cls, key: str) -> "NodeType":
+        """Resolve a JSON node collection key to its concrete node type."""
+        normalized = str(key).strip().lower()
+        for node_type in cls:
+            if node_type.collection_key == normalized:
+                return node_type
+        valid = ", ".join(node_type.collection_key for node_type in cls)
+        raise ValueError(
+            f"Unknown node-layer collection key {key!r}; expected one of: {valid}"
+        )
+
+
+SUPPORTED_NODE_TYPES = tuple(NodeType)
+
+
+def node_layer_for_type(node_type: NodeType) -> NodeLayer:
+    """Return the runtime hierarchy layer implied by a concrete node type."""
+    layers = {
+        NodeType.AGENT: NodeLayer.MOTION,
+        NodeType.OBJECT: NodeLayer.OBJECT,
+        NodeType.NAVIGATION: NodeLayer.NAVIGATION,
+        NodeType.REGION: NodeLayer.NAVIGATION,
+        NodeType.ROOM: NodeLayer.SEMANTIC,
+    }
+    try:
+        return layers[node_type]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported node type: {node_type!r}") from exc
 
 
 # ID range offsets for type-scoped ID system
@@ -199,6 +240,8 @@ class BaseNode:
         # Check that the pose has the field shape used by core and ROS poses.
         if self.pose is None or not _is_pose_like(self.pose):
             raise ValueError(f"Pose must have a valid Pose instance, got {self.pose}.")
+        if self.node_type == NodeType.OBJECT:
+            validate_object_attributes(self.attributes)
         # Copy created_at into last_seen if not set
         if self.last_seen is None:
             self.last_seen = self.created_at
@@ -216,22 +259,51 @@ class BaseNode:
         - "node_type": Type of the node (as a string or NodeLayer enum)
         - "attributes": Optional dictionary of additional attributes
         """
+        node_type = (
+            NodeType.from_string(data["node_type"])
+            if "node_type" in data
+            else NodeType.from_string(data["type"])
+            if "type" in data
+            else None
+        )
+        layer = NodeLayer.from_string(data["layer"]) if "layer" in data else None
+        if layer is None and node_type is not None:
+            layer = node_layer_for_type(node_type)
+        attributes = dict(data.get("attributes", {}) or {})
+        if node_type == NodeType.OBJECT:
+            for group in OBJECT_ATTRIBUTE_GROUPS:
+                value = data.get(group)
+                if isinstance(value, dict):
+                    attributes[group] = dict(value)
+
         return cls(
             id=data.get("id", None),
             pose=pose_from_dict(data.get("pose", {})),
             created_at=data.get("created_at", time()),
             last_seen=data.get("last_seen", None),
-            node_type=NodeType.from_string(data["node_type"])
-            if "node_type" in data
-            else None,
-            layer=NodeLayer.from_string(data["layer"]) if "layer" in data else None,
-            attributes=data.get("attributes", {}),
+            node_type=node_type,
+            layer=layer,
+            attributes=attributes,
         )
 
     def to_dict(self) -> Dict:
         """
         Convert the Node instance to a dictionary representation (JSON serializable).
         """
+
+        if self.node_type == NodeType.OBJECT:
+            # Keep the direct node serialization path aligned with the persisted
+            # JSON exporter. The import is local to avoid a representation /
+            # serialization module cycle during package initialization.
+            from ..serialization import SceneGraphJsonSerializer
+
+            entry = SceneGraphJsonSerializer()._object_node_to_entry(self)
+            # A standalone node has no containing collection, so retain the
+            # public direct-node discriminator. Graph exports omit both fields
+            # because their collection supplies the same information.
+            entry["type"] = "OBJECT"
+            entry["layer"] = "OBJECT"
+            return entry
 
         def _ser_time(t):
             # ROS2 builtin_interfaces.msg.Time
@@ -423,3 +495,18 @@ class RegionNode(BaseNode):
 
         # Call parent post_init
         super().__post_init__()
+
+
+def node_factory(node_type: NodeType, **kwargs: Any) -> BaseNode:
+    """Construct the domain node class associated with ``node_type``."""
+    factories = {
+        NodeType.AGENT: PoseNode,
+        NodeType.OBJECT: ObjectNode,
+        NodeType.NAVIGATION: NavNode,
+        NodeType.REGION: RegionNode,
+        NodeType.ROOM: RoomNode,
+    }
+    try:
+        return factories[node_type](**kwargs)
+    except KeyError as exc:
+        raise ValueError(f"Unsupported node type: {node_type!r}") from exc

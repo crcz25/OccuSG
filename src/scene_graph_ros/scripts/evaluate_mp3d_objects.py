@@ -64,7 +64,6 @@ CONFIDENCE_KEYS = (
     "confidence",
     "score",
     "detection_confidence",
-    "class_confidence",
     "probability",
     "semantic_score",
 )
@@ -135,7 +134,17 @@ def extract_xyz(value: Any) -> Optional[Tuple[float, ...]]:
 
 def nested_dicts(node: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     yield node
-    for key in ("attributes", "semantic", "metadata", "data", "properties"):
+    for key in (
+        "attributes",
+        "geometry",
+        "semantic",
+        "detection",
+        "embeddings",
+        "observations",
+        "metadata",
+        "data",
+        "properties",
+    ):
         value = node.get(key)
         if isinstance(value, dict):
             yield value
@@ -164,6 +173,9 @@ def extract_position(node: Dict[str, Any]) -> Optional[Tuple[float, ...]]:
 
 
 def looks_like_object_node(node: Dict[str, Any]) -> bool:
+    collection = str(node.get("_collection_type", "")).lower()
+    if collection in {"object_nodes", "objects"}:
+        return True
     for scope in nested_dicts(node):
         for key in ("type", "node_type", "layer"):
             value = scope.get(key)
@@ -185,9 +197,18 @@ def iter_graph_nodes(graph: Any) -> Tuple[List[Tuple[str, Dict[str, Any]]], str]
                 "top-level nodes list"
             )
         if isinstance(nodes, dict):
-            return [(str(k), v) for k, v in nodes.items() if isinstance(v, dict)], (
-                "top-level nodes dict"
-            )
+            grouped = []
+            for collection, entries in nodes.items():
+                if not isinstance(entries, list):
+                    raise ValueError(
+                        f"Node collection {collection!r} must contain a list"
+                    )
+                for index, entry in enumerate(entries):
+                    if isinstance(entry, dict):
+                        enriched = dict(entry)
+                        enriched["_collection_type"] = str(collection)
+                        grouped.append((str(entry.get("id", f"{collection}:{index}")), enriched))
+            return grouped, "NodeLayer-grouped node collections"
 
         node_like = [
             (str(k), v)

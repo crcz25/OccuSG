@@ -4,9 +4,19 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from ..representation import BaseNode, Edge, EdgeType, NodeLayer, NodeType, SceneGraph
+from ..representation import (
+    BaseNode,
+    Edge,
+    EdgeType,
+    NodeLayer,
+    NodeType,
+    SceneGraph,
+    node_factory,
+    node_layer_for_type,
+)
 from ..representation.node import pose_from_dict
-from ..serialization import OBSOLETE_OBJECT_ATTRIBUTE_KEYS, SceneGraphJsonSerializer
+from ..representation.object_schema import OBJECT_ATTRIBUTE_GROUPS
+from ..serialization import SceneGraphJsonSerializer
 
 
 class SerializationInterface:
@@ -87,9 +97,8 @@ class SerializationInterface:
 
         # Load nodes. Supports both the current export schema and the older
         # round-trip shape used before the exporter replacement.
-        nodes_data = data.get("nodes", [])
-        for node_data in nodes_data:
-            node = self._node_from_serialized_dict(node_data)
+        for node_data, collection_type in self._iter_serialized_nodes(data.get("nodes", [])):
+            node = self._node_from_serialized_dict(node_data, collection_type)
             self._graph.add_node(node)
 
         # Load edges.
@@ -145,58 +154,134 @@ class SerializationInterface:
 
         self.from_dict(data)
 
-    def _node_from_serialized_dict(self, data: Dict[str, Any]) -> BaseNode:
+    @staticmethod
+    def _iter_serialized_nodes(nodes_data):
+        """Yield node entries from the grouped schema or the legacy flat list."""
+        if isinstance(nodes_data, list):
+            for node_data in nodes_data:
+                if not isinstance(node_data, dict):
+                    raise ValueError("Each legacy node entry must be an object")
+                yield node_data, None
+            return
+        if not isinstance(nodes_data, dict):
+            raise ValueError("'nodes' must be a node-layer mapping or legacy list")
+
+        for collection_key, entries in nodes_data.items():
+            node_type = NodeType.from_collection_key(collection_key)
+            if not isinstance(entries, list):
+                raise ValueError(
+                    f"Node collection {collection_key!r} must contain a list"
+                )
+            for node_data in entries:
+                if not isinstance(node_data, dict):
+                    raise ValueError(
+                        f"Node collection {collection_key!r} contains a non-object entry"
+                    )
+                yield node_data, node_type
+
+    def _node_from_serialized_dict(
+        self, data: Dict[str, Any], collection_type: Optional[NodeType] = None
+    ) -> BaseNode:
         node_type_value = data.get("type", data.get("node_type"))
-        layer_value = data.get("layer")
-        node = BaseNode(
+        node_type = collection_type
+        if node_type is None and isinstance(node_type_value, str):
+            node_type = NodeType.from_string(node_type_value)
+        if node_type is None and isinstance(data.get("layer"), str):
+            layer = NodeLayer.from_string(data["layer"])
+            node_type = {
+                NodeLayer.SEMANTIC: NodeType.ROOM,
+                NodeLayer.OBJECT: NodeType.OBJECT,
+                NodeLayer.NAVIGATION: NodeType.NAVIGATION,
+                NodeLayer.MOTION: NodeType.AGENT,
+            }.get(layer)
+            if node_type is None:
+                raise ValueError(
+                    f"Cannot infer a concrete node type from legacy layer {layer.value!r}"
+                )
+        if node_type is None:
+            raise ValueError("Node entry has no collection, type, node_type, or layer")
+
+        layer_value = node_layer_for_type(node_type)
+        if collection_type is None and isinstance(data.get("layer"), str):
+            # The legacy flat schema carried the runtime hierarchy layer.
+            layer_value = NodeLayer.from_string(data["layer"])
+        node = node_factory(
             id=data.get("id"),
             pose=pose_from_dict(data.get("pose", {})),
             created_at=data.get("created_at"),
             last_seen=data.get("last_seen"),
-            node_type=(
-                NodeType.from_string(node_type_value)
-                if isinstance(node_type_value, str)
-                else node_type_value
-            ),
-            layer=(
-                NodeLayer.from_string(layer_value)
-                if isinstance(layer_value, str)
-                else layer_value
-            ),
-            attributes=self._object_attributes(data),
+            node_type=node_type,
+            layer=layer_value,
+            attributes=self._object_attributes(data, node_type),
             active=data.get("active", True),
         )
         return node
 
     @staticmethod
-    def _object_attributes(data: Dict[str, Any]) -> Dict[str, Any]:
-        """Load explicit object tracking fields into the canonical attributes."""
+    def _object_attributes(
+        data: Dict[str, Any], node_type: NodeType
+    ) -> Dict[str, Any]:
+        """Reconstruct runtime attributes, migrating legacy object entries."""
         attributes = dict(data.get("attributes", {}) or {})
-        if str(data.get("type", data.get("node_type", ""))).upper() != "OBJECT":
+        if node_type != NodeType.OBJECT:
             return attributes
 
-        # Fields written by removed pipelines never re-enter a live graph.
-        for key in OBSOLETE_OBJECT_ATTRIBUTE_KEYS:
-            attributes.pop(key, None)
+        result = {
+            key: value
+            for key, value in attributes.items()
+            if key not in OBJECT_ATTRIBUTE_GROUPS
+            and key not in {
+                "class_name", "class_confidence", "class_evidence",
+                "detection_confidence", "detector_source",
+                "semantic_perception_class_id", "object_embedding",
+                "label_embedding", "mask_embedding", "bbox_embedding",
+                "fused_embedding", "embedding_sum", "sum",
+                "detection_observation_count", "embedding_observation_count",
+                "last_semantic_similarity", "bbox_3d_size",
+                "detection_score", "object_id", "class_id", "observation_count",
+                "valid_3d", "semantic_perception_id", "similarity_score",
+                "entropy_score", "first_seen",
+            }
+        }
 
-        # Tolerate exports whose object tracking state was promoted out of the
-        # attribute bag into top-level node fields.
-        for key in (
-            "object_embedding",
-            "label_embedding",
-            "mask_embedding",
-            "bbox_embedding",
-            "fused_embedding",
-            "class_name",
-            "class_confidence",
-            "class_evidence",
-            "detection_observation_count",
-            "embedding_observation_count",
-            "first_seen",
-        ):
-            if key in data and key not in attributes:
-                attributes[key] = data[key]
-        return attributes
+        sources = [attributes, data]
+        for key in ("geometry", "semantic", "detection", "embeddings", "observations"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+        groups = {group: {} for group in OBJECT_ATTRIBUTE_GROUPS}
+        for source in sources:
+            for key, group in {
+                "class_name": "semantic",
+                "bbox_3d_size": "geometry",
+                "detection_confidence": "detection",
+                "detector_source": "detection",
+                "semantic_perception_class_id": "detection",
+                "object_embedding": "embeddings",
+                "label_embedding": "embeddings",
+                "mask_embedding": "embeddings",
+                "bbox_embedding": "embeddings",
+                "fused_embedding": "embeddings",
+                "embedding_sum": "embeddings",
+                "sum": "embeddings",
+                "detection_observation_count": "observations",
+                "embedding_observation_count": "observations",
+                "last_semantic_similarity": "observations",
+            }.items():
+                if key in source:
+                    target_key = "sum" if key == "embedding_sum" else key
+                    groups[group][target_key] = source[key]
+        for group in OBJECT_ATTRIBUTE_GROUPS:
+            value = data.get(group)
+            if isinstance(value, dict):
+                groups[group].update(value)
+        semantic = groups["semantic"]
+        if "class_name" in semantic:
+            groups["semantic"] = {"class_name": semantic["class_name"]}
+        return {
+            **result,
+            **{group: values for group, values in groups.items() if values},
+        }
 
     def _edge_from_serialized_dict(self, data: Dict[str, Any]) -> Edge:
         edge_type_value = data.get("type", EdgeType.CUSTOM)

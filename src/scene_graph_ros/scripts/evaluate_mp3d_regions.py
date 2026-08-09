@@ -355,6 +355,9 @@ def make_polygon(
 
 
 def node_type_value(node: Dict[str, Any]) -> str:
+    collection = str(node.get("_collection_type", "")).lower()
+    if collection.endswith("_nodes"):
+        return collection[:-6].upper()
     for scope in nested_dicts(node):
         for key in ("type", "node_type", "layer"):
             value = scope.get(key)
@@ -368,6 +371,9 @@ def node_type_value(node: Dict[str, Any]) -> str:
 
 
 def looks_like_region_node(node: Dict[str, Any]) -> bool:
+    collection = str(node.get("_collection_type", "")).lower()
+    if collection in {"room_nodes", "region_nodes", "rooms", "regions"}:
+        return True
     for scope in nested_dicts(node):
         for key in ("type", "node_type", "layer"):
             value = scope.get(key)
@@ -388,9 +394,18 @@ def iter_graph_nodes(graph: Any) -> Tuple[List[Tuple[str, Dict[str, Any]]], str]
                 if isinstance(n, dict)
             ], "top-level nodes list"
         if isinstance(nodes, dict):
-            return [(str(k), v) for k, v in nodes.items() if isinstance(v, dict)], (
-                "top-level nodes dict"
-            )
+            grouped = []
+            for collection, entries in nodes.items():
+                if not isinstance(entries, list):
+                    raise ValueError(
+                        f"Node collection {collection!r} must contain a list"
+                    )
+                for index, entry in enumerate(entries):
+                    if isinstance(entry, dict):
+                        enriched = dict(entry)
+                        enriched["_collection_type"] = str(collection)
+                        grouped.append((str(entry.get("id", f"{collection}:{index}")), enriched))
+            return grouped, "NodeLayer-grouped node collections"
 
         node_like = [
             (str(k), v)

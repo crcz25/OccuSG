@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from scene_graph_core.algorithms.semantic import normalize_embedding
-from scene_graph_core.representation import Edge, EdgeType, NodeType, SceneGraph
+from scene_graph_core.representation import Edge, NodeType, SceneGraph
+from scene_graph_core.representation.node import SUPPORTED_NODE_TYPES
+from scene_graph_core.representation.object_schema import (
+    OBJECT_ATTRIBUTE_GROUPS,
+    OBJECT_EMBEDDING_KEYS,
+    OBJECT_KNOWN_KEYS,
+    split_object_attributes,
+)
 
 try:
     import numpy as np
@@ -31,50 +38,7 @@ GEOMETRY_ATTRIBUTE_KEYS = (
     "footprint_nav_node_ids",
 )
 
-SEMANTIC_ATTRIBUTE_KEYS = (
-    "class_name",
-    "class_confidence",
-    "class_evidence",
-    "detection_confidence",
-    "detector_source",
-    "object_embedding",
-    "label_embedding",
-    "mask_embedding",
-    "bbox_embedding",
-    "fused_embedding",
-    "detection_observation_count",
-    "embedding_observation_count",
-    "last_semantic_similarity",
-    "semantic_perception_class_id",
-    "bbox_3d_size",
-    "signature_set",
-    "object_in_los",
-)
-
-# Unit-norm embedding vectors exported as plain numeric JSON arrays.
-OBJECT_EMBEDDING_KEYS = (
-    "object_embedding",
-    "label_embedding",
-    "mask_embedding",
-    "bbox_embedding",
-    "fused_embedding",
-)
-
-# Attributes written only by pipelines that have been removed: the detector-based
-# object pipeline and the weighted running-mean embedding representation.
-OBSOLETE_OBJECT_ATTRIBUTE_KEYS = frozenset(
-    {
-        "detection_score",
-        "object_id",
-        "class_id",
-        "observation_count",
-        "valid_3d",
-        "semantic_perception_id",
-        "embedding_sum",
-        "similarity_score",
-        "entropy_score",
-    }
-)
+SEMANTIC_ATTRIBUTE_KEYS = ("class_name", "signature_set", "object_in_los")
 
 PROTECTED_METADATA_KEYS = frozenset(
     {
@@ -89,7 +53,21 @@ PROTECTED_METADATA_KEYS = frozenset(
 class SceneGraphJsonSerializer:
     """Serialize all persisted nodes and edges in a scene graph to JSON."""
 
-    schema_version = "2.0"
+    schema_version = "3.0"
+    _LEGACY_OBJECT_KEYS = frozenset(
+        {
+            "class_name", "class_confidence", "class_evidence",
+            "detection_confidence", "detector_source",
+            "semantic_perception_class_id", "object_embedding",
+            "label_embedding", "mask_embedding", "bbox_embedding",
+            "fused_embedding", "embedding_sum", "sum",
+            "detection_observation_count", "embedding_observation_count",
+            "last_semantic_similarity", "bbox_3d_size",
+            "detection_score", "object_id", "class_id", "observation_count",
+            "valid_3d", "semantic_perception_id", "similarity_score",
+            "entropy_score", "first_seen",
+        }
+    )
 
     def to_dict(
         self,
@@ -114,14 +92,28 @@ class SceneGraphJsonSerializer:
             ),
         )
 
-        node_entries = [self._node_to_entry(node, graph) for node in nodes]
+        grouped_nodes = {node_type.collection_key: [] for node_type in SUPPORTED_NODE_TYPES}
+        for node in nodes:
+            node_type = getattr(node, "node_type", None)
+            if not isinstance(node_type, NodeType):
+                raise ValueError(
+                    f"Cannot serialize node {getattr(node, 'id', None)!r}: "
+                    f"unsupported node type {node_type!r}"
+                )
+            grouped_nodes[node_type.collection_key].append(self._node_to_entry(node))
+        for entries in grouped_nodes.values():
+            entries.sort(key=lambda entry: self._stable_sort_key(entry.get("id")))
+
+        node_entries = [entry for entries in grouped_nodes.values() for entry in entries]
         edge_entries = [self._edge_to_entry(edge) for edge in edges]
-        export_metadata = self._build_metadata(metadata, node_entries, edge_entries)
+        export_metadata = self._build_metadata(
+            metadata, node_entries, edge_entries, grouped_nodes
+        )
 
         return {
             "schema_version": self.schema_version,
             "metadata": export_metadata,
-            "nodes": node_entries,
+            "nodes": grouped_nodes,
             "edges": edge_entries,
         }
 
@@ -198,16 +190,14 @@ class SceneGraphJsonSerializer:
             f"got {type(scene_graph)!r}"
         )
 
-    def _node_to_entry(self, node: Any, graph: SceneGraph) -> Dict[str, Any]:
-        attributes = dict(self._json_safe(getattr(node, "attributes", None) or {}))
+    def _node_to_entry(self, node: Any) -> Dict[str, Any]:
         if getattr(node, "node_type", None) == NodeType.OBJECT:
-            for key in OBSOLETE_OBJECT_ATTRIBUTE_KEYS:
-                attributes.pop(key, None)
+            return self._object_node_to_entry(node)
+
+        attributes = dict(self._json_safe(getattr(node, "attributes", None) or {}))
 
         entry = {
             "id": self._json_safe(getattr(node, "id", None)),
-            "type": self._enum_name(getattr(node, "node_type", None)),
-            "layer": self._enum_name(getattr(node, "layer", None)),
             "pose": self._pose_to_json(getattr(node, "pose", None)),
             "created_at": self._json_safe(getattr(node, "created_at", None)),
             "last_seen": self._json_safe(getattr(node, "last_seen", None)),
@@ -216,58 +206,58 @@ class SceneGraphJsonSerializer:
             "geometry": self._project_attributes(attributes, GEOMETRY_ATTRIBUTE_KEYS),
             "semantic": self._project_attributes(attributes, SEMANTIC_ATTRIBUTE_KEYS),
         }
-
-        if getattr(node, "node_type", None) != NodeType.OBJECT:
-            return entry
-
-        # Object nodes carry the semantic-perception tracking state explicitly so
-        # downstream tooling never has to reach into the raw attribute bag.
-        pose = entry["pose"] or {}
-        room_id = self._room_id_for_object(node, graph)
-        semantic = entry["semantic"]
-        semantic.update(
-            {
-                "room_id": room_id,
-                "room_assigned": room_id is not None,
-                "position": pose.get("position"),
-                "bbox_3d_size": attributes.get("bbox_3d_size"),
-                "class_name": attributes.get("class_name") or None,
-                "class_confidence": attributes.get("class_confidence", 0.0),
-                "class_evidence": attributes.get("class_evidence") or {},
-                "detection_observation_count": attributes.get(
-                    "detection_observation_count", 0
-                ),
-                "embedding_observation_count": attributes.get(
-                    "embedding_observation_count", 0
-                ),
-                "first_seen": attributes.get("first_seen", entry["created_at"]),
-                "last_seen": entry["last_seen"],
-            }
-        )
-        for key in OBJECT_EMBEDDING_KEYS:
-            vector = normalize_embedding(attributes.get(key))
-            semantic[key] = (
-                vector.astype(np.float32).tolist() if vector is not None else None
-            )
         return entry
 
-    def _room_id_for_object(self, node: Any, graph: SceneGraph) -> Optional[int]:
-        """Return the single ROOM_CONTAINS parent room of one object node."""
-        if getattr(node, "id", None) is None:
-            return None
-        room_ids = []
-        try:
-            edges = graph.get_incoming_edges(int(node.id), EdgeType.ROOM_CONTAINS)
-        except KeyError:
-            return None
-        for edge in edges:
-            try:
-                room = graph.get_node(int(edge.source_id))
-            except KeyError:
-                continue
-            if room.node_type == NodeType.ROOM:
-                room_ids.append(int(room.id))
-        return min(room_ids) if room_ids else None
+    def _object_node_to_entry(self, node: Any) -> Dict[str, Any]:
+        """Serialize one OBJECT node without projection duplicates."""
+        attributes = getattr(node, "attributes", None) or {}
+        groups = split_object_attributes(attributes)
+
+        # Custom attributes are retained, while canonical groups are promoted
+        # exactly once to their named JSON locations.
+        custom_attributes = {
+            key: value
+            for key, value in attributes.items()
+            if key not in OBJECT_ATTRIBUTE_GROUPS
+            and key not in OBJECT_KNOWN_KEYS
+            and key not in self._LEGACY_OBJECT_KEYS
+        }
+        entry: Dict[str, Any] = {
+            "id": self._json_safe(getattr(node, "id", None)),
+            "pose": self._pose_to_json(getattr(node, "pose", None)),
+            "created_at": self._json_safe(getattr(node, "created_at", None)),
+            "last_seen": self._json_safe(getattr(node, "last_seen", None)),
+            "active": self._json_safe(getattr(node, "active", True)),
+        }
+        if custom_attributes:
+            entry["attributes"] = self._json_safe(custom_attributes)
+
+        if "semantic" in groups:
+            semantic = groups["semantic"]
+            if "class_name" in semantic:
+                entry["semantic"] = {"class_name": self._json_safe(semantic["class_name"])}
+
+        for group in ("geometry", "detection", "observations"):
+            if group in groups:
+                entry[group] = self._json_safe(groups[group])
+
+        if "embeddings" in groups:
+            embeddings = {}
+            for key, value in groups["embeddings"].items():
+                if key == "sum":
+                    embeddings[key] = self._json_safe(value)
+                    continue
+                if key in OBJECT_EMBEDDING_KEYS:
+                    vector = normalize_embedding(value)
+                    embeddings[key] = (
+                        vector.astype(np.float32).tolist()
+                        if vector is not None
+                        else None
+                    )
+                else:
+                    embeddings[key] = self._json_safe(value)
+            entry["embeddings"] = embeddings
+        return entry
 
     def _edge_to_entry(self, edge: Edge) -> Dict[str, Any]:
         return {
@@ -285,6 +275,7 @@ class SceneGraphJsonSerializer:
         metadata: Optional[Mapping[str, Any]],
         node_entries: list[Dict[str, Any]],
         edge_entries: list[Dict[str, Any]],
+        grouped_nodes: Mapping[str, list[Dict[str, Any]]],
     ) -> Dict[str, Any]:
         user_metadata = dict(metadata or {})
         result = {
@@ -298,7 +289,11 @@ class SceneGraphJsonSerializer:
             {
                 "num_nodes": len(node_entries),
                 "num_edges": len(edge_entries),
-                "node_type_counts": self._count_entries(node_entries, "type"),
+                "node_type_counts": {
+                    node_type.value: len(grouped_nodes[node_type.collection_key])
+                    for node_type in SUPPORTED_NODE_TYPES
+                    if grouped_nodes[node_type.collection_key]
+                },
                 "edge_type_counts": self._count_entries(edge_entries, "type"),
             }
         )

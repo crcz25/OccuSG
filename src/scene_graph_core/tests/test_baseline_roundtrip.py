@@ -79,7 +79,7 @@ def test_roundtrip_serialization():
     # Verify serialized data structure
     assert "nodes" in data
     assert "edges" in data
-    assert len(data["nodes"]) == 3
+    assert sum(len(collection) for collection in data["nodes"].values()) == 3
     assert len(data["edges"]) == 2
 
     # Create new scene graph and load data
@@ -116,7 +116,7 @@ def test_empty_graph_serialization():
 
     # Serialize empty graph
     data = sg.serialize.to_dict()
-    assert len(data["nodes"]) == 0
+    assert all(collection == [] for collection in data["nodes"].values())
     assert len(data["edges"]) == 0
 
     # Load into new graph

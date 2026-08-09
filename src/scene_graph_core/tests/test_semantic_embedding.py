@@ -7,9 +7,7 @@ import numpy as np
 import pytest
 
 from scene_graph_core.algorithms.semantic import (
-    accumulate_class_evidence,
     accumulate_embedding,
-    canonical_class_from_evidence,
     cosine_similarity,
     mean_embedding,
     normalize_embedding,
@@ -173,51 +171,3 @@ def test_mean_embedding_requires_observations():
     assert mean_embedding([1.0, 0.0], 0) is None
     assert mean_embedding(None, 3) is None
     assert np.allclose(mean_embedding([2.0, 0.0], 2), [1.0, 0.0], atol=1e-6)
-
-
-# ========== class evidence ==========
-
-
-def test_class_evidence_accumulates_weighted_observations():
-    evidence = accumulate_class_evidence(None, "chair", 0.8)
-    evidence = accumulate_class_evidence(evidence, "chair", 0.6)
-    evidence = accumulate_class_evidence(evidence, "table", 0.5)
-    assert evidence == pytest.approx({"chair": 1.4, "table": 0.5})
-
-
-def test_canonical_class_is_the_strongest_accumulated_class():
-    evidence = {"chair": 1.4, "table": 0.5, "lamp": 0.1}
-    name, confidence = canonical_class_from_evidence(evidence)
-    assert name == "chair"
-    assert confidence == pytest.approx(1.4 / 2.0)
-
-
-def test_canonical_class_is_not_the_latest_detection():
-    evidence = None
-    for _ in range(5):
-        evidence = accumulate_class_evidence(evidence, "chair", 1.0)
-    evidence = accumulate_class_evidence(evidence, "sofa", 1.0)
-    assert canonical_class_from_evidence(evidence)[0] == "chair"
-
-
-def test_class_evidence_trims_whitespace_and_skips_unusable_labels():
-    evidence = accumulate_class_evidence(None, "  potted plant  ", 1.0)
-    evidence = accumulate_class_evidence(evidence, "", 1.0)
-    evidence = accumulate_class_evidence(evidence, None, 1.0)
-    assert evidence == {"potted plant": 1.0}
-
-
-def test_class_evidence_defaults_invalid_weights_to_one():
-    for weight in (None, "x", 0.0, -1.0, float("nan")):
-        assert accumulate_class_evidence(None, "chair", weight) == {"chair": 1.0}
-
-
-def test_canonical_class_ties_break_on_name():
-    name, _ = canonical_class_from_evidence({"table": 1.0, "chair": 1.0})
-    assert name == "chair"
-
-
-def test_canonical_class_of_empty_evidence_is_none():
-    assert canonical_class_from_evidence(None) == (None, 0.0)
-    assert canonical_class_from_evidence({}) == (None, 0.0)
-    assert canonical_class_from_evidence({"chair": 0.0}) == (None, 0.0)

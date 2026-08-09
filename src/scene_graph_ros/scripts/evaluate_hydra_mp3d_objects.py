@@ -71,7 +71,6 @@ CONFIDENCE_KEYS = (
     "confidence",
     "score",
     "detection_confidence",
-    "class_confidence",
     "probability",
     "semantic_score",
 )
@@ -135,9 +134,15 @@ def extract_xyz(value: Any) -> Optional[Tuple[float, ...]]:
 
 
 def first_value(mapping: Dict[str, Any], keys: Sequence[str]) -> Any:
-    for key in keys:
-        if key in mapping and mapping.get(key) not in (None, ""):
-            return mapping.get(key)
+    scopes = [mapping]
+    for group in ("semantic", "detection", "embeddings", "observations", "geometry"):
+        value = mapping.get(group)
+        if isinstance(value, dict):
+            scopes.append(value)
+    for scope in scopes:
+        for key in keys:
+            if key in scope and scope.get(key) not in (None, ""):
+                return scope.get(key)
     return None
 
 

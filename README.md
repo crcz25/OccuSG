@@ -325,19 +325,21 @@ decides:
   and no node is created. Semantic disagreement is never treated as evidence that
   a second physical object occupies the same place.
 
-Each OBJECT node keeps `object_embedding` as `normalize(embedding_sum / count)`
-over its valid `fused_embedding` observations, plus separate
-`detection_observation_count` and `embedding_observation_count`, accumulated
-`class_evidence`, and a canonical `class_name` recomputed from that evidence.
+Each OBJECT node keeps `embeddings.object_embedding` as the normalized running
+aggregate of valid `fused_embedding` observations. The exact accumulator is
+retained as `embeddings.sum`, with separate counters in `observations` and
+detector metadata in `detection`. Object semantic state contains only the
+current `semantic.class_name`; `class_confidence` and `class_evidence` are no
+longer runtime or persisted fields.
 
 Room membership uses only the object's own position and the DuDe region polygons:
 strict containment first, then the nearest boundary within
 `object_room_boundary_tolerance`, otherwise unassigned. It is re-evaluated when
 the object moves and whenever Incremental DUDE publishes new region geometry.
 
-The exported JSON uses schema version `2.0`. See
-[`src/scene_graph_core/README.md`](src/scene_graph_core/README.md) for the object
-node schema.
+The exported JSON uses schema version `3.0`. See
+[`src/scene_graph_core/OBJECT_NODE_SCHEMA.md`](src/scene_graph_core/OBJECT_NODE_SCHEMA.md)
+for the previous schema, canonical schema, and field migration decisions.
 
 ## Tests
 
