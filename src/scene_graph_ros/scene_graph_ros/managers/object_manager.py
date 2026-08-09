@@ -10,7 +10,7 @@ Association policy, in order:
 1. Collect OBJECT nodes within ``spatial_association_distance`` of the proposal.
 2. No nearby node -> create a new object node.
 3. Nearby nodes -> score each candidate's ``object_embedding`` against the
-   proposal's ``fused_embedding`` with cosine similarity.
+   proposal's per-view embedding with cosine similarity.
 4. Best candidate at or above ``semantic_similarity_threshold`` -> update it.
 5. Nearby nodes but none similar enough -> the detection is *spatially ambiguous*
    and no node is created. Semantic disagreement is never treated as evidence
@@ -31,9 +31,9 @@ import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
 from scene_graph_core.algorithms.semantic import (
-    accumulate_embedding,
     cosine_similarity,
     normalize_embedding,
+    update_running_mean_embedding,
 )
 from scene_graph_core.graph_interface import SceneGraphInterface
 from scene_graph_core.representation import (
@@ -445,14 +445,14 @@ class ObjectNodeManager:
 
         position = (float(centroid.x), float(centroid.y), float(centroid.z))
 
-        fused_embedding = normalize_embedding(getattr(proposal, "fused_embedding", None))
-        if fused_embedding is None:
+        view_embedding = normalize_embedding(getattr(proposal, "fused_embedding", None))
+        if view_embedding is None:
             self.stats["rejected_invalid_embedding"] += 1
             self.logger.warning(
-                f"[object_proposals] rejected idx={detection_index}: invalid_fused_embedding",
+                f"[object_proposals] rejected idx={detection_index}: invalid_view_embedding",
                 throttle_duration_sec=5.0,
             )
-            return None, "invalid_fused_embedding"
+            return None, "invalid_view_embedding"
 
         class_name = " ".join(str(getattr(proposal, "class_name", "") or "").split())
         if not class_name:
@@ -468,7 +468,7 @@ class ObjectNodeManager:
         try:
             candidates = self._find_candidates(position, target_room_id)
             match, similarity = self._select_best_candidate(
-                candidates, fused_embedding
+                candidates, view_embedding
             )
         except Exception as exc:
             self.logger.error(
@@ -480,7 +480,7 @@ class ObjectNodeManager:
         try:
             if match is not None:
                 node = self._update_object_node(
-                    match, proposal, position, fused_embedding, class_name,
+                    match, proposal, position, view_embedding, class_name,
                     timestamp, similarity,
                 )
                 outcome = "updated"
@@ -498,7 +498,7 @@ class ObjectNodeManager:
                 return None, "spatially_ambiguous"
             else:
                 node = self._create_object_node(
-                    proposal, position, fused_embedding, class_name,
+                    proposal, position, view_embedding, class_name,
                     timestamp,
                 )
                 outcome = "created"
@@ -583,7 +583,7 @@ class ObjectNodeManager:
     def _select_best_candidate(
         self,
         candidates: List[Tuple[BaseNode, float]],
-        fused_embedding: np.ndarray,
+        view_embedding: np.ndarray,
     ) -> Tuple[Optional[BaseNode], Optional[float]]:
         """Return the best semantically compatible candidate and its similarity.
 
@@ -598,7 +598,7 @@ class ObjectNodeManager:
 
         for node, distance in candidates:
             stored = object_group(node.attributes, "embeddings").get("object_embedding")
-            similarity = cosine_similarity(fused_embedding, stored)
+            similarity = cosine_similarity(view_embedding, stored)
             if similarity is None:
                 continue
             if observed_best is None or similarity > observed_best:
@@ -619,7 +619,7 @@ class ObjectNodeManager:
         self,
         proposal,
         position: Tuple[float, float, float],
-        fused_embedding: np.ndarray,
+        view_embedding: np.ndarray,
         class_name: str,
         timestamp: float,
     ) -> BaseNode:
@@ -632,8 +632,8 @@ class ObjectNodeManager:
         node.created_at = timestamp
         node.last_seen = timestamp
 
-        embedding_sum, embedding_count, mean = accumulate_embedding(
-            None, 0, fused_embedding
+        object_embedding, embedding_count = update_running_mean_embedding(
+            None, 0, view_embedding
         )
         node.attributes = {
             "semantic": {"class_name": class_name},
@@ -642,8 +642,7 @@ class ObjectNodeManager:
                 "embedding_observation_count": int(embedding_count),
             },
             "embeddings": {
-                "sum": _as_list(embedding_sum),
-                "object_embedding": _as_list(mean),
+                "object_embedding": _as_list(object_embedding),
             },
         }
         for group, values in self._canonical_components(proposal).items():
@@ -657,7 +656,7 @@ class ObjectNodeManager:
         node: BaseNode,
         proposal,
         position: Tuple[float, float, float],
-        fused_embedding: np.ndarray,
+        view_embedding: np.ndarray,
         class_name: str,
         timestamp: float,
         similarity: Optional[float],
@@ -675,14 +674,13 @@ class ObjectNodeManager:
         embedding_count = self._nonnegative_int(
             observations.get("embedding_observation_count"), default=0
         )
-        embedding_sum, embedding_count, mean = accumulate_embedding(
-            embeddings.get("sum"), embedding_count, fused_embedding
+        object_embedding, embedding_count = update_running_mean_embedding(
+            embeddings.get("object_embedding"), embedding_count, view_embedding
         )
 
         observations["detection_observation_count"] = detection_count + 1
         observations["embedding_observation_count"] = int(embedding_count)
-        embeddings["sum"] = _as_list(embedding_sum)
-        embeddings["object_embedding"] = _as_list(mean)
+        embeddings["object_embedding"] = _as_list(object_embedding)
         semantic["class_name"] = class_name
         if similarity is not None:
             observations["last_semantic_similarity"] = float(similarity)
@@ -696,15 +694,15 @@ class ObjectNodeManager:
         return node
 
     def _canonical_components(self, proposal) -> Dict[str, Dict[str, object]]:
-        """Return the per-observation CLIP components kept on the node."""
+        """Return retained perception state for one object observation."""
         components: Dict[str, Dict[str, object]] = {
             "embeddings": {},
             "detection": {},
             "geometry": {},
         }
-        for name in ("mask_embedding", "bbox_embedding", "label_embedding", "fused_embedding"):
-            vector = normalize_embedding(getattr(proposal, name, None))
-            components["embeddings"][name] = _as_list(vector)
+        components["embeddings"]["label_embedding"] = _as_list(
+            normalize_embedding(getattr(proposal, "label_embedding", None))
+        )
         components["detection"]["detection_confidence"] = self._finite_scalar(
             getattr(proposal, "detection_confidence", None)
         )

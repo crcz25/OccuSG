@@ -31,10 +31,6 @@ OBJECT_DETECTION_KEYS = (
 OBJECT_EMBEDDING_KEYS = (
     "object_embedding",
     "label_embedding",
-    "mask_embedding",
-    "bbox_embedding",
-    "fused_embedding",
-    "sum",
 )
 
 OBJECT_OBSERVATION_KEYS = (
@@ -92,7 +88,13 @@ def split_object_attributes(attributes: Mapping[str, Any] | None) -> Dict[str, D
     for group in OBJECT_ATTRIBUTE_GROUPS:
         value = attributes.get(group)
         if isinstance(value, Mapping) and value:
-            result[group] = dict(value)
+            if group == "embeddings":
+                value = {
+                    key: entry for key, entry in value.items()
+                    if key in OBJECT_EMBEDDING_KEYS
+                }
+            if value:
+                result[group] = dict(value)
     return result
 
 

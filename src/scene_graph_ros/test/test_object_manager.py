@@ -39,8 +39,8 @@ class MockLogger:
         pass
 
 
-# Orthogonal directions give unambiguous cosine outcomes. The manager only ever
-# sees the fused vector, so these stand in for concat(mask, bbox, label).
+# Orthogonal directions give unambiguous cosine outcomes. These stand in for
+# already-normalized per-view representations from semantic perception.
 CHAIR_EMBEDDING = (1.0, 0.0, 0.0)
 TABLE_EMBEDDING = (0.0, 1.0, 0.0)
 LAMP_EMBEDDING = (0.0, 0.0, 1.0)
@@ -72,7 +72,7 @@ def _make_proposal(
     y: float,
     *,
     z: float = 0.0,
-    embedding=CHAIR_EMBEDDING,
+    view_embedding=CHAIR_EMBEDDING,
     class_name: str = "chair",
     confidence: float = 0.9,
     valid_3d: bool = True,
@@ -92,12 +92,10 @@ def _make_proposal(
     proposal.bbox_3d.size.x = 0.3
     proposal.bbox_3d.size.y = 0.3
     proposal.bbox_3d.size.z = 0.3
-    proposal.mask_embedding = [1.0, 0.0, 0.0]
-    proposal.bbox_embedding = [0.0, 1.0, 0.0]
     if label_embedding is not None:
         proposal.label_embedding = [float(value) for value in label_embedding]
-    if embedding is not None:
-        proposal.fused_embedding = [float(value) for value in embedding]
+    if view_embedding is not None:
+        proposal.fused_embedding = [float(value) for value in view_embedding]
     return proposal
 
 
@@ -162,16 +160,16 @@ def test_no_nearby_node_creates_one_object():
             "detection_confidence",
             "detection_observation_count",
             "first_seen",
-            "embedding_sum",
         )
     )
     assert object_group(node.attributes, "semantic")["class_name"] == "chair"
     assert object_group(node.attributes, "observations")["detection_observation_count"] == 1
     assert object_group(node.attributes, "observations")["embedding_observation_count"] == 1
     assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx([1.0, 0.0, 0.0])
-    assert object_group(node.attributes, "embeddings")["label_embedding"] == pytest.approx([0.0, 0.0, 1.0])
-    assert object_group(node.attributes, "embeddings")["mask_embedding"] == pytest.approx([1.0, 0.0, 0.0])
-    assert object_group(node.attributes, "embeddings")["bbox_embedding"] == pytest.approx([0.0, 1.0, 0.0])
+    assert object_group(node.attributes, "embeddings") == {
+        "object_embedding": pytest.approx([1.0, 0.0, 0.0]),
+        "label_embedding": pytest.approx([0.0, 0.0, 1.0]),
+    }
     assert node.created_at == pytest.approx(100.0)
 
 
@@ -236,7 +234,7 @@ def test_best_semantic_match_is_selected():
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(2.0, 1.0, embedding=TABLE_EMBEDDING, class_name="table"),
+            _make_proposal(2.0, 1.0, view_embedding=TABLE_EMBEDDING, class_name="table"),
             stamp_sec=101,
         ),
     )
@@ -262,7 +260,7 @@ def test_equal_similarity_breaks_on_distance():
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.0, 1.0, embedding=TABLE_EMBEDDING, class_name="table"),
+            _make_proposal(1.0, 1.0, view_embedding=TABLE_EMBEDDING, class_name="table"),
             stamp_sec=101,
         ),
     )
@@ -274,7 +272,7 @@ def test_equal_similarity_breaks_on_distance():
     stats = _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.05, 1.0, embedding=(1.0, 1.0, 0.0)), stamp_sec=102
+            _make_proposal(1.05, 1.0, view_embedding=(1.0, 1.0, 0.0)), stamp_sec=102
         ),
     )
 
@@ -291,7 +289,7 @@ def test_incompatible_nearby_node_produces_ambiguity_without_creating_a_node():
     stats = _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.05, 1.0, embedding=TABLE_EMBEDDING, class_name="table"),
+            _make_proposal(1.05, 1.0, view_embedding=TABLE_EMBEDDING, class_name="table"),
             stamp_sec=101,
         ),
     )
@@ -312,7 +310,7 @@ def test_ambiguity_counter_increments():
         _apply(
             manager,
             _make_proposal_array(
-                _make_proposal(1.05, 1.0, embedding=TABLE_EMBEDDING),
+                _make_proposal(1.05, 1.0, view_embedding=TABLE_EMBEDDING),
                 stamp_sec=101 + index,
             ),
         )
@@ -345,7 +343,7 @@ def test_dimension_mismatch_candidate_is_ambiguous_not_a_new_node():
     stats = _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.02, 1.0, embedding=(1.0, 0.0)), stamp_sec=101
+            _make_proposal(1.02, 1.0, view_embedding=(1.0, 0.0)), stamp_sec=101
         ),
     )
 
@@ -367,11 +365,11 @@ def test_dimension_mismatch_candidate_is_ambiguous_not_a_new_node():
         ({"valid_3d": False}, "invalid_3d_geometry", "rejected_invalid_geometry"),
         ({"x": float("inf")}, "nonfinite_centroid", "rejected_invalid_geometry"),
         (
-            {"embedding": (0.0, 0.0, 0.0)},
-            "invalid_fused_embedding",
+            {"view_embedding": (0.0, 0.0, 0.0)},
+            "invalid_view_embedding",
             "rejected_invalid_embedding",
         ),
-        ({"embedding": None}, "invalid_fused_embedding", "rejected_invalid_embedding"),
+        ({"view_embedding": None}, "invalid_view_embedding", "rejected_invalid_embedding"),
         (
             {"class_name": ""},
             "missing_class_name",
@@ -418,7 +416,7 @@ def test_one_bad_proposal_does_not_block_the_batch():
         manager,
         _make_proposal_array(
             _make_proposal(1.0, 1.0, valid_3d=False),
-            _make_proposal(3.0, 3.0, embedding=TABLE_EMBEDDING),
+            _make_proposal(3.0, 3.0, view_embedding=TABLE_EMBEDDING),
         ),
     )
 
@@ -429,50 +427,46 @@ def test_one_bad_proposal_does_not_block_the_batch():
 # ========== node state ==========
 
 
-def test_object_embedding_is_the_normalized_running_mean_of_the_sum():
+def test_object_embedding_is_the_unweighted_running_mean_of_view_embeddings():
     manager = _make_manager(semantic_similarity_threshold=-1.0)
 
     _apply(manager, _make_proposal_array(_make_proposal(1.0, 1.0)))
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.05, 1.0, embedding=TABLE_EMBEDDING), stamp_sec=101
+            _make_proposal(1.05, 1.0, view_embedding=TABLE_EMBEDDING), stamp_sec=101
         ),
     )
 
     node = _object_nodes(manager)[0]
-    expected_sum = np.array([1.0, 0.0, 0.0]) + np.array([0.0, 1.0, 0.0])
-    assert object_group(node.attributes, "embeddings")["sum"] == pytest.approx(expected_sum, abs=1e-6)
     assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx(
-        expected_sum / np.linalg.norm(expected_sum), abs=1e-6
+        [0.5, 0.5, 0.0], abs=1e-6
     )
     assert object_group(node.attributes, "observations")["embedding_observation_count"] == 2
 
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.05, 1.0, embedding=LAMP_EMBEDDING), stamp_sec=102
+            _make_proposal(1.05, 1.0, view_embedding=LAMP_EMBEDDING), stamp_sec=102
         ),
     )
     node = _object_nodes(manager)[0]
-    expected_sum = expected_sum + np.array([0.0, 0.0, 1.0])
-    assert object_group(node.attributes, "embeddings")["sum"] == pytest.approx(expected_sum, abs=1e-6)
     assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx(
-        expected_sum / np.linalg.norm(expected_sum), abs=1e-6
+        [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], abs=1e-6
     )
     assert object_group(node.attributes, "observations")["embedding_observation_count"] == 3
 
 
-def test_stored_object_embedding_is_unit_norm():
+def test_stored_object_embedding_is_not_renormalized():
     manager = _make_manager(semantic_similarity_threshold=-1.0)
-    _apply(manager, _make_proposal_array(_make_proposal(1.0, 1.0, embedding=(7.0, 0.0, 0.0))))
+    _apply(manager, _make_proposal_array(_make_proposal(1.0, 1.0, view_embedding=(7.0, 0.0, 0.0))))
     _apply(
         manager,
-        _make_proposal_array(_make_proposal(1.05, 1.0, embedding=(0.0, 3.0, 0.0)), stamp_sec=101),
+        _make_proposal_array(_make_proposal(1.05, 1.0, view_embedding=(0.0, 3.0, 0.0)), stamp_sec=101),
     )
 
     stored = object_group(_object_nodes(manager)[0].attributes, "embeddings")["object_embedding"]
-    assert math.isclose(float(np.linalg.norm(stored)), 1.0, rel_tol=1e-6)
+    assert stored == pytest.approx([0.5, 0.5, 0.0], abs=1e-6)
 
 
 def test_object_semantic_state_retains_only_the_current_class_name():
@@ -507,14 +501,14 @@ def test_detection_and_embedding_counters_are_separate():
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.0, 1.0, embedding=(-1.0, 0.0, 0.0)), stamp_sec=101
+            _make_proposal(1.0, 1.0, view_embedding=(-1.0, 0.0, 0.0)), stamp_sec=101
         ),
     )
 
     node = _object_nodes(manager)[0]
     assert object_group(node.attributes, "observations")["detection_observation_count"] == 2
     assert object_group(node.attributes, "observations")["embedding_observation_count"] == 2
-    assert object_group(node.attributes, "embeddings")["object_embedding"] is None
+    assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx([0.0, 0.0, 0.0])
 
 
 def test_position_update_policies():
@@ -693,7 +687,7 @@ def test_statistics_cover_every_outcome():
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(1.05, 1.0, embedding=TABLE_EMBEDDING), stamp_sec=102
+            _make_proposal(1.05, 1.0, view_embedding=TABLE_EMBEDDING), stamp_sec=102
         ),
     )
     _apply(
@@ -703,7 +697,7 @@ def test_statistics_cover_every_outcome():
     _apply(
         manager,
         _make_proposal_array(
-            _make_proposal(9.0, 9.0, embedding=(0.0, 0.0, 0.0)), stamp_sec=104
+            _make_proposal(9.0, 9.0, view_embedding=(0.0, 0.0, 0.0)), stamp_sec=104
         ),
     )
     _apply(

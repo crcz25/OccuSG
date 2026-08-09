@@ -37,12 +37,11 @@ OBJECT nodes use the grouped canonical blocks `geometry`, `semantic`,
 `detection`, `embeddings`, and `observations`; those blocks are not copied into
 `attributes`.
 
-`object_embedding` is the normalized running aggregate used for association.
-The raw accumulator is retained as `embeddings.sum` because a normalized mean
-and count cannot reconstruct it exactly. Component embeddings and
-`fused_embedding` remain separate for classification inspection and future
-observations. `created_at` is the first observation timestamp, while room
-membership is represented by the `ROOM_CONTAINS` graph edge.
+`object_embedding` is the unweighted running mean of normalized per-view
+embeddings and is used for association. `label_embedding` retains the normalized
+text embedding for the most recent observation. `created_at` is the first
+observation timestamp, while room membership is represented by the
+`ROOM_CONTAINS` graph edge.
 
 `scene_graph_core.algorithms.semantic` provides the ROS-free embedding helpers
 used by perception updates.

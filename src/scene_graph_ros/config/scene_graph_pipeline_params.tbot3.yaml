@@ -71,7 +71,7 @@ semantic_perception:
 
     detection_threshold: 0.35
     text_threshold: 0.25
-    # fused_embedding = normalize(concat(mask, bbox, label)); dimension is 3 x D.
+    # Each proposal embedding is a normalized concatenation of mask, box, and label views (3 x D).
     sync_queue_size: 10
     sync_slop_seconds: 0.1
     min_valid_depth_points: 20
@@ -169,7 +169,7 @@ scene_graph_region:
     # updated; if none qualifies the detection is counted as spatially ambiguous
     # and no node is created.
     object_spatial_association_distance: 0.75   # metres
-    object_semantic_similarity_threshold: 0.70  # cosine similarity, [-1, 1]
+    object_semantic_similarity_threshold: 0.90  # cosine similarity, [-1, 1]
     object_position_update_policy: "running_mean"
     # Metres an object position may lie outside a DuDe region polygon and still
     # be attached to that room. Used only to break ties for outside points.

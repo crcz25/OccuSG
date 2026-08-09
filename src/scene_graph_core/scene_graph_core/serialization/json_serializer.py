@@ -16,7 +16,6 @@ from scene_graph_core.representation import Edge, NodeType, SceneGraph
 from scene_graph_core.representation.node import SUPPORTED_NODE_TYPES
 from scene_graph_core.representation.object_schema import (
     OBJECT_ATTRIBUTE_GROUPS,
-    OBJECT_EMBEDDING_KEYS,
     OBJECT_KNOWN_KEYS,
     split_object_attributes,
 )
@@ -58,9 +57,7 @@ class SceneGraphJsonSerializer:
         {
             "class_name", "class_confidence", "class_evidence",
             "detection_confidence", "detector_source",
-            "semantic_perception_class_id", "object_embedding",
-            "label_embedding", "mask_embedding", "bbox_embedding",
-            "fused_embedding", "embedding_sum", "sum",
+            "semantic_perception_class_id", "object_embedding", "label_embedding",
             "detection_observation_count", "embedding_observation_count",
             "last_semantic_similarity", "bbox_3d_size",
             "detection_score", "object_id", "class_id", "observation_count",
@@ -242,21 +239,15 @@ class SceneGraphJsonSerializer:
                 entry[group] = self._json_safe(groups[group])
 
         if "embeddings" in groups:
-            embeddings = {}
-            for key, value in groups["embeddings"].items():
-                if key == "sum":
-                    embeddings[key] = self._json_safe(value)
-                    continue
-                if key in OBJECT_EMBEDDING_KEYS:
-                    vector = normalize_embedding(value)
-                    embeddings[key] = (
-                        vector.astype(np.float32).tolist()
-                        if vector is not None
-                        else None
-                    )
-                else:
-                    embeddings[key] = self._json_safe(value)
-            entry["embeddings"] = embeddings
+            embeddings = dict(groups["embeddings"])
+            label_embedding = normalize_embedding(embeddings.get("label_embedding"))
+            if "label_embedding" in embeddings:
+                embeddings["label_embedding"] = (
+                    label_embedding.astype(np.float32).tolist()
+                    if label_embedding is not None
+                    else None
+                )
+            entry["embeddings"] = self._json_safe(embeddings)
         return entry
 
     def _edge_to_entry(self, edge: Edge) -> Dict[str, Any]:

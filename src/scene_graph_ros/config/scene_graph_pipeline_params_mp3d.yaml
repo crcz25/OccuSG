@@ -69,9 +69,9 @@ semantic_perception:
     gpu_memory_budget_gb: 12.0
     stats_report_interval_sec: 10.0
 
-    detection_threshold: 0.35
-    text_threshold: 0.25
-    # fused_embedding = normalize(concat(mask, bbox, label)); dimension is 3 x D.
+    detection_threshold: 0.6
+    text_threshold: 0.6
+    # Each proposal embedding is a normalized concatenation of mask, box, and label views (3 x D).
     sync_queue_size: 10
     sync_slop_seconds: 0.1
     min_valid_depth_points: 20

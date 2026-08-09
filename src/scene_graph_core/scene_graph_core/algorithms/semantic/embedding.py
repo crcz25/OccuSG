@@ -68,49 +68,25 @@ def _finite_vector(values: Optional[Sequence[float]]) -> Optional[np.ndarray]:
     return value
 
 
-def accumulate_embedding(
-    embedding_sum: Optional[Sequence[float]],
+def update_running_mean_embedding(
+    object_embedding: Optional[Sequence[float]],
     observation_count: int,
     new_embedding: Optional[Sequence[float]],
-) -> tuple[Optional[np.ndarray], int, Optional[np.ndarray]]:
-    """Fold one observation into an embedding sum accumulator.
+) -> tuple[Optional[np.ndarray], int]:
+    """Fold one unit-normalized view embedding into an unweighted mean.
 
-    The accumulator stores the raw sum of unit-norm observations, so the mean is
-    exact at every step and never drifts through repeated re-normalization.
-
-    Invalid new observations leave the accumulator and count unchanged. A missing,
-    invalid, or dimensionally inconsistent accumulator is re-seeded from the new
-    observation.
-
-    Returns:
-        Tuple of (embedding sum, observation count, normalized mean). The mean is
-        ``None`` only when the accumulator holds no usable direction.
+    The persisted object representation is the arithmetic mean of every valid,
+    unit-normalized view embedding. Invalid, missing, or incompatible stored
+    values are re-seeded from the new view.
     """
     new_normalized = normalize_embedding(new_embedding)
-    if new_normalized is None:
-        current = _finite_vector(embedding_sum)
-        return (
-            current,
-            _nonnegative_count(observation_count),
-            normalize_embedding(current),
-        )
-
     count = _nonnegative_count(observation_count)
-    current = _finite_vector(embedding_sum)
+    current = _finite_vector(object_embedding)
+    if new_normalized is None:
+        return current.astype(np.float32) if current is not None else None, count
     if current is None or count == 0 or current.shape != new_normalized.shape:
-        updated = new_normalized.astype(np.float64)
-        return updated, 1, normalize_embedding(updated)
+        return new_normalized, 1
 
-    updated = current + new_normalized.astype(np.float64)
-    return updated, count + 1, normalize_embedding(updated)
-
-
-def mean_embedding(
-    embedding_sum: Optional[Sequence[float]],
-    observation_count: int,
-) -> Optional[np.ndarray]:
-    """Return the unit-norm mean of an embedding sum accumulator."""
-    current = _finite_vector(embedding_sum)
-    if current is None or _nonnegative_count(observation_count) <= 0:
-        return None
-    return normalize_embedding(current / float(_nonnegative_count(observation_count)))
+    updated_count = count + 1
+    updated = current + (new_normalized.astype(np.float64) - current) / updated_count
+    return updated.astype(np.float32), updated_count

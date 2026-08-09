@@ -54,6 +54,8 @@ class Proposal:
     embeddings: CropEmbedding
     geometry: Geometry3D
     mask_pixels: int = 0
+    sam_score: float | None = None
+    text_score: float | None = None
 
 
 @dataclass
@@ -405,13 +407,20 @@ class WorkerPool:
         """
         candidates: list[Detection] = []
         unmapped = 0
+        below_confidence_threshold = 0
+        detection_threshold = float(self._config["detection_threshold"])
         for box, confidence, local_index, phrase in models.detector.detect_with_classes(
             rgb,
             self._prompt.labels,
             self._prompt.caption,
-            float(self._config["detection_threshold"]),
+            detection_threshold,
             float(self._config["text_threshold"]),
         ):
+            # Enforce the configured threshold independently of detector-backend
+            # behavior. Equality is rejected: published detections must be greater.
+            if not float(confidence) > detection_threshold:
+                below_confidence_threshold += 1
+                continue
             global_index = resolve_global_index(
                 self._prompt, self.labels.vocabulary, local_index, phrase
             )
@@ -433,6 +442,10 @@ class WorkerPool:
             )
         if unmapped:
             self._stats.count("unmapped_phrase", unmapped)
+        if below_confidence_threshold:
+            self._stats.count(
+                "below_detection_threshold", below_confidence_threshold
+            )
         if len(candidates) < 2:
             return candidates
         # A multi-class caption can return several boxes over the same region
@@ -450,10 +463,12 @@ class WorkerPool:
         detections = self._detect_vocabulary(frame.rgb, models)
         detected = time.monotonic()
         boxes = [detection.box_xyxy for detection in detections]
-        masks = models.segmenter.segment(frame.rgb, boxes)
-        if len(masks) != len(boxes):
+        segmentations = models.segmenter.segment_with_scores(frame.rgb, boxes)
+        if len(segmentations) != len(boxes):
             self._warning("SAM returned the wrong number of masks; treating all masks as invalid")
-            masks = [None] * len(boxes)
+            segmentations = [(None, None)] * len(boxes)
+        masks = [item[0] for item in segmentations]
+        sam_scores = [item[1] for item in segmentations]
         segmented = time.monotonic()
         # The label embedding is looked up, never re-encoded, and a cache miss
         # invalidates the detection instead of contributing a zero vector.
@@ -473,7 +488,9 @@ class WorkerPool:
         )
         embedded = time.monotonic()
         proposals = []
-        for detection, mask, embedding in zip(detections, masks, embeddings):
+        for detection, mask, embedding, sam_score in zip(
+            detections, masks, embeddings, sam_scores
+        ):
             geometry = compute_geometry(
                 frame.depth_m,
                 mask,
@@ -490,6 +507,10 @@ class WorkerPool:
                     embedding,
                     geometry,
                     mask_pixels=int(np.count_nonzero(mask)) if mask is not None else 0,
+                    sam_score=sam_score,
+                    text_score=_embedding_similarity(
+                        embedding.mask_embedding, embedding.label_embedding
+                    ),
                 )
             )
         finished = time.monotonic()
@@ -531,3 +552,20 @@ class WorkerPool:
                 f"Dropped RGB-D frame {sequence}: {reason} "
                 f"({self._dropped_frames} total dropped)"
             )
+
+
+def _embedding_similarity(
+    image_embedding: np.ndarray, label_embedding: np.ndarray
+) -> float | None:
+    """Return finite CLIP cosine similarity for one image crop and text label."""
+    image = np.asarray(image_embedding, dtype=np.float32).reshape(-1)
+    label = np.asarray(label_embedding, dtype=np.float32).reshape(-1)
+    if (
+        image.size == 0
+        or image.shape != label.shape
+        or not np.isfinite(image).all()
+        or not np.isfinite(label).all()
+    ):
+        return None
+    score = float(np.dot(image, label))
+    return score if np.isfinite(score) else None

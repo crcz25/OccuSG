@@ -1,13 +1,13 @@
 import numpy as np
 
-from semantic_perception.debug_image import render_debug_image
+import semantic_perception.debug_image as debug_image
 from semantic_perception.inference.crop_embeddings import CropEmbedding
 from semantic_perception.inference.geometry import Geometry3D
 from semantic_perception.inference.models import Detection
 from semantic_perception.worker import Proposal
 
 
-def test_debug_image_contains_mask_box_and_class_label():
+def test_debug_image_contains_mask_box_class_and_model_scores(monkeypatch):
     rgb = np.zeros((80, 100, 3), dtype=np.uint8)
     mask = np.zeros((80, 100), dtype=bool)
     mask[20:60, 25:75] = True
@@ -27,14 +27,22 @@ def test_debug_image_contains_mask_box_and_class_label():
         mask,
         embedding,
         Geometry3D.invalid(),
+        sam_score=0.91,
+        text_score=0.73,
+    )
+    captions = []
+    monkeypatch.setattr(
+        debug_image,
+        "_draw_caption",
+        lambda _image, caption, *_args: captions.append(caption),
     )
 
-    rendered = render_debug_image(
-        rgb, [proposal], lambda _: ("chair", 0.9), mask_alpha=0.5
+    rendered = debug_image.render_debug_image(
+        rgb, [proposal], mask_alpha=0.5
     )
 
     assert rendered.shape == rgb.shape
     assert rendered.dtype == np.uint8
     assert rendered[40, 50].any()  # Mask overlay.
     assert rendered[15, 20].any()  # Bounding box.
-
+    assert captions == ["chair | Det 0.88 | SAM 0.91"]

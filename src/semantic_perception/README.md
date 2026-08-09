@@ -266,12 +266,8 @@ ros2 topic echo \
 
 With `publish_debug_image: true`, the node publishes:
 
-- GroundingDINO boxes and confidence values;
-- MobileSAM mask overlays;
-- the nearest cached OpenCLIP class label.
-
-The class label is for visualization only. `ObjectProposal3D.class_name` remains
-unset because semantic classification is reserved for a later module.
+- GroundingDINO boxes, resolved class labels, and detection confidence;
+- MobileSAM mask overlays and selected-mask score.
 
 View the reliable debug stream with:
 

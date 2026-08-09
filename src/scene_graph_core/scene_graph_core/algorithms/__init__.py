@@ -12,10 +12,9 @@ Usage:
 """
 
 from .semantic import (
-    accumulate_embedding,
     cosine_similarity,
-    mean_embedding,
     normalize_embedding,
+    update_running_mean_embedding,
 )
 from .spatial import (
     RegionAssignment,
@@ -29,12 +28,11 @@ from .spatial import (
 __all__ = [
     "RegionAssignment",
     "SpatialIndex",
-    "accumulate_embedding",
     "assign_region",
     "cosine_similarity",
     "create_spatial_index",
     "distance_to_polygon_boundary",
-    "mean_embedding",
     "normalize_embedding",
     "point_in_polygon",
+    "update_running_mean_embedding",
 ]

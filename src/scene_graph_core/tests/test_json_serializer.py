@@ -66,12 +66,8 @@ def _make_graph():
                 "last_semantic_similarity": 0.91,
             },
             "embeddings": {
-                "sum": [6.0, 8.0],
-                "object_embedding": [3.0, 4.0],
+                "object_embedding": [0.3, 0.4],
                 "label_embedding": [0.0, 2.0],
-                "mask_embedding": [1.0, 0.0],
-                "bbox_embedding": [0.0, 1.0],
-                "fused_embedding": [1.0, 0.0, 0.0, 1.0, 0.0, 2.0],
             },
         },
     )
@@ -232,26 +228,10 @@ def test_full_persisted_graph_export_and_json_safe_values():
     }
     assert "attributes" not in obj_entry
 
-    # Every embedding is exported as a unit-norm numeric JSON array.
-    for key, expected in (
-        ("object_embedding", [0.6, 0.8]),
-        ("label_embedding", [0.0, 1.0]),
-        ("mask_embedding", [1.0, 0.0]),
-        ("bbox_embedding", [0.0, 1.0]),
-    ):
-        vector = obj_embeddings[key]
-        assert isinstance(vector, list)
-        assert all(isinstance(value, float) for value in vector)
-        assert vector == pytest.approx(expected, abs=1e-6)
-        assert math.isclose(sum(v * v for v in vector), 1.0, rel_tol=1e-6)
-
-    # The fused vector keeps its 3D dimension through serialization.
-    fused = obj_embeddings["fused_embedding"]
-    assert len(fused) == 3 * len(obj_embeddings["object_embedding"])
-    assert math.isclose(sum(v * v for v in fused), 1.0, rel_tol=1e-6)
-
-    assert obj_embeddings["sum"] == [6.0, 8.0]
-    assert "embedding_sum" not in json.dumps(obj_entry)
+    assert obj_embeddings == {
+        "object_embedding": [0.3, 0.4],
+        "label_embedding": [0.0, 1.0],
+    }
 
     obj_b_entry = next(node for node in _entries(data) if node["id"] == ids["obj_b"])
     assert obj_b_entry["semantic"]["class_name"] == "lamp"
@@ -350,22 +330,24 @@ def test_object_embedding_round_trips_through_the_interface(tmp_path):
 
     obj = reloaded.query.get_node(ids["obj"])
     assert obj.attributes["embeddings"]["object_embedding"] == pytest.approx(
-        [0.6, 0.8], abs=1e-6
+        [0.3, 0.4], abs=1e-6
     )
     assert obj.attributes["embeddings"]["label_embedding"] == pytest.approx(
         [0.0, 1.0], abs=1e-6
     )
-    assert len(obj.attributes["embeddings"]["fused_embedding"]) == 6
     reexported = reloaded.serialize.to_dict()
     obj_entry = next(node for node in _entries(reexported) if node["id"] == ids["obj"])
     assert obj_entry["embeddings"]["object_embedding"] == pytest.approx(
-        [0.6, 0.8], abs=1e-6
+        [0.3, 0.4], abs=1e-6
     )
     assert obj_entry["semantic"]["class_name"] == "chair"
     assert obj.attributes["observations"]["detection_observation_count"] == 5
     assert obj.attributes["observations"]["embedding_observation_count"] == 4
     assert obj.attributes["semantic"]["class_name"] == "chair"
-    assert obj.attributes["embeddings"]["sum"] == [6.0, 8.0]
+    assert obj.attributes["embeddings"] == {
+        "object_embedding": [0.3, 0.4],
+        "label_embedding": [0.0, 1.0],
+    }
 
     obj_b = reloaded.query.get_node(ids["obj_b"])
     assert "embeddings" not in obj_b.attributes
@@ -415,7 +397,7 @@ def test_object_node_from_dict_reconstructs_grouped_state():
             "last_seen": 11.0,
             "semantic": {"class_name": "table"},
             "detection": {"detection_confidence": 0.8},
-            "embeddings": {"sum": [1.0, 0.0], "object_embedding": [1.0, 0.0]},
+            "embeddings": {"object_embedding": [1.0, 0.0]},
             "observations": {"detection_observation_count": 2},
         }
     )
@@ -424,30 +406,9 @@ def test_object_node_from_dict_reconstructs_grouped_state():
     assert node.attributes == {
         "semantic": {"class_name": "table"},
         "detection": {"detection_confidence": 0.8},
-        "embeddings": {"sum": [1.0, 0.0], "object_embedding": [1.0, 0.0]},
+        "embeddings": {"object_embedding": [1.0, 0.0]},
         "observations": {"detection_observation_count": 2},
     }
-
-
-def test_removed_object_fields_are_not_serialized():
-    sg = create_scene_graph_interface()
-    node = ObjectNode()
-    node.attributes = {
-        "semantic": {"class_name": "chair"},
-        "detection_score": 0.5,
-        "object_id": 42,
-        "embedding_sum": [1.0, 0.0],
-    }
-    node_id = sg.update.add_node(node)
-
-    entry = next(
-        item for item in _entries(SceneGraphJsonSerializer().to_dict(sg))
-        if item["id"] == node_id
-    )
-    serialized = json.dumps(entry)
-    assert "detection_score" not in serialized
-    assert "object_id" not in serialized
-    assert "embedding_sum" not in serialized
 
 
 def test_direct_object_node_serialization_uses_canonical_schema():

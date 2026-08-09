@@ -539,7 +539,6 @@ class SemanticPerceptionNode(Node):
             rendered = render_debug_image(
                 result.frame.rgb,
                 result.proposals,
-                self._workers.best_class,
                 self._debug_mask_alpha,
             )
             debug_message = self._bridge.cv2_to_imgmsg(rendered, encoding="bgr8")

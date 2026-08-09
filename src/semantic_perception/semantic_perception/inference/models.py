@@ -527,7 +527,16 @@ class SamAdapter:
             raise ValueError(f"Unknown SAM model type '{model_type}'; available: {available}")
         raise RuntimeError(f"Failed to load SAM model: {last_error}")
 
-    def segment(self, rgb: np.ndarray, boxes: Sequence[np.ndarray]) -> list[np.ndarray | None]:
+    def segment(
+        self, rgb: np.ndarray, boxes: Sequence[np.ndarray]
+    ) -> list[np.ndarray | None]:
+        """Return the selected mask for each detector box."""
+        return [mask for mask, _ in self.segment_with_scores(rgb, boxes)]
+
+    def segment_with_scores(
+        self, rgb: np.ndarray, boxes: Sequence[np.ndarray]
+    ) -> list[tuple[np.ndarray | None, float | None]]:
+        """Return each selected mask together with SAM's predicted mask score."""
         if not boxes:
             return []
         box_array = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
@@ -537,7 +546,7 @@ class SamAdapter:
 
     def _segment_batched(
         self, image_hw: tuple[int, int], box_array: np.ndarray
-    ) -> list[np.ndarray | None]:
+    ) -> list[tuple[np.ndarray | None, float | None]]:
         """Decode all boxes in one GPU call instead of one call per box."""
         torch = self._torch
         box_tensor = torch.as_tensor(box_array, device=self._predictor.device)
@@ -550,7 +559,18 @@ class SamAdapter:
         )
         best = scores.argmax(dim=1)
         selected = masks[torch.arange(masks.shape[0], device=masks.device), best]
-        return [np.asarray(mask, dtype=bool) for mask in selected.cpu().numpy()]
+        selected_scores = scores[
+            torch.arange(scores.shape[0], device=scores.device), best
+        ]
+        return [
+            (
+                np.asarray(mask, dtype=bool),
+                float(score) if np.isfinite(float(score)) else None,
+            )
+            for mask, score in zip(
+                selected.cpu().numpy(), selected_scores.detach().cpu().numpy()
+            )
+        ]
 
 
 class ModelBundle:

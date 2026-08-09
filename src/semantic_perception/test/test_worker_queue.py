@@ -134,6 +134,32 @@ def test_best_class_uses_cached_text_embeddings():
     assert score == pytest.approx(0.8, abs=1e-6)
 
 
+def test_detection_confidence_must_be_strictly_above_the_configured_threshold():
+    from semantic_perception.inference.vocabulary import DetectorPrompt, Vocabulary
+
+    class Detector:
+        def detect_with_classes(self, *_args):
+            return [
+                (np.array([0, 0, 1, 1]), 0.30, 0, "chair"),
+                (np.array([0, 0, 1, 1]), 0.35, 0, "chair"),
+                (np.array([0, 0, 1, 1]), 0.3501, 0, "chair"),
+            ]
+
+    pool, _ = make_pool()
+    pool._config = {"detection_threshold": 0.35, "text_threshold": 0.25}
+    pool._prompt = DetectorPrompt(("chair",), (0,))
+    pool.labels = types.SimpleNamespace(vocabulary=Vocabulary(("chair",)))
+    pool._merge_iou_threshold = 0.7
+
+    detections = pool._detect_vocabulary(
+        np.empty((1, 1, 3), dtype=np.uint8),
+        types.SimpleNamespace(detector=Detector()),
+    )
+
+    assert [detection.confidence for detection in detections] == [0.3501]
+    assert pool._stats.snapshot()[0]["below_detection_threshold"] == 2
+
+
 def test_worker_run_logs_full_exception_and_terminates_without_recovery():
     """A raw processing failure is logged in full and the worker thread stops;
     nothing classifies, hides, or "recovers" from it."""

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -21,10 +21,9 @@ _COLORS_BGR = (
 def render_debug_image(
     rgb: np.ndarray,
     proposals: Sequence,
-    resolve_class: Callable[[np.ndarray], tuple[str, float]],
     mask_alpha: float = 0.45,
 ) -> np.ndarray:
-    """Return a BGR image with masks, boxes, class labels, and DINO scores."""
+    """Return a BGR image with masks, labels, and model confidence scores."""
     if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
         raise ValueError("Debug RGB input must have shape HxWx3 and dtype uint8")
     if not 0.0 <= mask_alpha <= 1.0:
@@ -57,11 +56,22 @@ def render_debug_image(
             continue
 
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
-        class_name, _ = resolve_class(proposal.embeddings.fused_embedding)
-        class_name = class_name or "object"
-        caption = f"{class_name} | DINO {proposal.detection.confidence:.2f}"
+        class_name = str(proposal.detection.class_name or "object")
+        caption = (
+            f"{class_name} | Det {_format_score(proposal.detection.confidence)} "
+            f"| SAM {_format_score(proposal.sam_score)}"
+        )
         _draw_caption(image, caption, x1, y1, color)
     return image
+
+
+def _format_score(value: object) -> str:
+    """Render an optional finite model score for a compact debug caption."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"{score:.2f}" if np.isfinite(score) else "n/a"
 
 
 def _draw_caption(

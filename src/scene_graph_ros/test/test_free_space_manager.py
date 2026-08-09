@@ -124,8 +124,6 @@ def _make_proposal_array(
     proposal.centroid_3d.x = float(x)
     proposal.centroid_3d.y = float(y)
     proposal.fused_embedding = [float(value) for value in embedding]
-    proposal.mask_embedding = [1.0, 0.0, 0.0]
-    proposal.bbox_embedding = [0.0, 1.0, 0.0]
     proposal.label_embedding = [0.0, 0.0, 1.0]
 
     msg.proposals.append(proposal)

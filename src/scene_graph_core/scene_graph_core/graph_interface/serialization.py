@@ -15,7 +15,10 @@ from ..representation import (
     node_layer_for_type,
 )
 from ..representation.node import pose_from_dict
-from ..representation.object_schema import OBJECT_ATTRIBUTE_GROUPS
+from ..representation.object_schema import (
+    OBJECT_ATTRIBUTE_GROUPS,
+    OBJECT_EMBEDDING_KEYS,
+)
 from ..serialization import SceneGraphJsonSerializer
 
 
@@ -233,9 +236,7 @@ class SerializationInterface:
             and key not in {
                 "class_name", "class_confidence", "class_evidence",
                 "detection_confidence", "detector_source",
-                "semantic_perception_class_id", "object_embedding",
-                "label_embedding", "mask_embedding", "bbox_embedding",
-                "fused_embedding", "embedding_sum", "sum",
+                "semantic_perception_class_id", "object_embedding", "label_embedding",
                 "detection_observation_count", "embedding_observation_count",
                 "last_semantic_similarity", "bbox_3d_size",
                 "detection_score", "object_id", "class_id", "observation_count",
@@ -259,21 +260,20 @@ class SerializationInterface:
                 "semantic_perception_class_id": "detection",
                 "object_embedding": "embeddings",
                 "label_embedding": "embeddings",
-                "mask_embedding": "embeddings",
-                "bbox_embedding": "embeddings",
-                "fused_embedding": "embeddings",
-                "embedding_sum": "embeddings",
-                "sum": "embeddings",
                 "detection_observation_count": "observations",
                 "embedding_observation_count": "observations",
                 "last_semantic_similarity": "observations",
             }.items():
                 if key in source:
-                    target_key = "sum" if key == "embedding_sum" else key
-                    groups[group][target_key] = source[key]
+                    groups[group][key] = source[key]
         for group in OBJECT_ATTRIBUTE_GROUPS:
             value = data.get(group)
             if isinstance(value, dict):
+                if group == "embeddings":
+                    value = {
+                        key: entry for key, entry in value.items()
+                        if key in OBJECT_EMBEDDING_KEYS
+                    }
                 groups[group].update(value)
         semantic = groups["semantic"]
         if "class_name" in semantic:

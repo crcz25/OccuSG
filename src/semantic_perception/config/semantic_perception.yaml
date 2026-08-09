@@ -17,7 +17,7 @@ semantic_perception:
     # Emit a per-frame projection trace at DEBUG level (frames, timestamps, raw
     # camera position, final graph position, mask pixels, depth statistics).
     publish_projection_diagnostics: false
-    # Debug image: MobileSAM masks + DINO boxes/scores + best OpenCLIP label.
+    # Debug image: masks, detector-resolved class labels, and Det/SAM scores.
     # Whether to render and publish the annotated debug image below.
     publish_debug_image: true
     # ROS topic for the annotated debug image (only published if publish_debug_image is true).
@@ -108,7 +108,7 @@ semantic_perception:
     # exceeds processing capacity.
     stats_report_interval_sec: 10.0
 
-    # GroundingDINO minimum box confidence for a detection to be kept, in [0, 1].
+    # Strict lower bound for a published GroundingDINO box confidence, in [0, 1].
     detection_threshold: 0.35
     # GroundingDINO minimum text-match score for a detection to be kept, in [0, 1].
     text_threshold: 0.25

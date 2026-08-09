@@ -131,15 +131,18 @@ class StandaloneInferencePipeline:
     def _detect(self, rgb: np.ndarray) -> list:
         """Detect the whole vocabulary in one pass and label each result."""
         candidates: list = []
+        detection_threshold = float(self.config["detection_threshold"])
         for box, confidence, local_index, phrase in (
             self.models.detector.detect_with_classes(
                 rgb,
                 self.prompt.labels,
                 self.prompt.caption,
-                float(self.config["detection_threshold"]),
+                detection_threshold,
                 float(self.config["text_threshold"]),
             )
         ):
+            if not float(confidence) > detection_threshold:
+                continue
             global_index = resolve_global_index(
                 self.prompt, self.labels.vocabulary, local_index, phrase
             )
