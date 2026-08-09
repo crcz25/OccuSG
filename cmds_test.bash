@@ -13,6 +13,8 @@ ros2 run semantic_perception semantic_perception_node --ros-args \
 ros2 launch semantic_perception semantic_perception.launch.py \
   config:=$PWD/src/semantic_perception/config/semantic_perception.yaml
 
+ros2 launch scene_graph_ros scene_graph_pipeline_mp3d_bag.launch.py   bag_path:=$PWD/bags scan_id:=2t7WUuJeko7
+
 source /opt/ros/humble/setup.bash
 cd /workspace/occusg_ws
 ros2 bag play bags/2t7WUuJeko7 \

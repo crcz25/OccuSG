@@ -15,6 +15,7 @@ from scene_graph_core.representation import (
     PoseNode,
     RoomNode,
 )
+from scene_graph_core.representation.object_schema import object_group
 from scene_graph_ros.managers.object_manager import ObjectNodeManager
 from scene_graph_ros.managers.room_manager import RoomManager
 
@@ -147,14 +148,31 @@ def test_no_nearby_node_creates_one_object():
     assert len(_object_nodes(manager)) == 1
 
     node = _object_nodes(manager)[0]
-    assert node.attributes["class_name"] == "chair"
-    assert node.attributes["detection_observation_count"] == 1
-    assert node.attributes["embedding_observation_count"] == 1
-    assert node.attributes["object_embedding"] == pytest.approx([1.0, 0.0, 0.0])
-    assert node.attributes["label_embedding"] == pytest.approx([0.0, 0.0, 1.0])
-    assert node.attributes["mask_embedding"] == pytest.approx([1.0, 0.0, 0.0])
-    assert node.attributes["bbox_embedding"] == pytest.approx([0.0, 1.0, 0.0])
-    assert node.attributes["first_seen"] == pytest.approx(100.0)
+    assert set(node.attributes) == {
+        "geometry",
+        "semantic",
+        "detection",
+        "embeddings",
+        "observations",
+    }
+    assert not any(
+        key in node.attributes
+        for key in (
+            "class_name",
+            "detection_confidence",
+            "detection_observation_count",
+            "first_seen",
+            "embedding_sum",
+        )
+    )
+    assert object_group(node.attributes, "semantic")["class_name"] == "chair"
+    assert object_group(node.attributes, "observations")["detection_observation_count"] == 1
+    assert object_group(node.attributes, "observations")["embedding_observation_count"] == 1
+    assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx([1.0, 0.0, 0.0])
+    assert object_group(node.attributes, "embeddings")["label_embedding"] == pytest.approx([0.0, 0.0, 1.0])
+    assert object_group(node.attributes, "embeddings")["mask_embedding"] == pytest.approx([1.0, 0.0, 0.0])
+    assert object_group(node.attributes, "embeddings")["bbox_embedding"] == pytest.approx([0.0, 1.0, 0.0])
+    assert node.created_at == pytest.approx(100.0)
 
 
 def test_distant_proposals_create_separate_objects():
@@ -185,11 +203,11 @@ def test_compatible_nearby_node_is_updated():
     assert len(_object_nodes(manager)) == 1
 
     node = _object_nodes(manager)[0]
-    assert node.attributes["detection_observation_count"] == 2
-    assert node.attributes["embedding_observation_count"] == 2
-    assert math.isclose(node.attributes["last_semantic_similarity"], 1.0, rel_tol=1e-6)
+    assert object_group(node.attributes, "observations")["detection_observation_count"] == 2
+    assert object_group(node.attributes, "observations")["embedding_observation_count"] == 2
+    assert math.isclose(object_group(node.attributes, "observations")["last_semantic_similarity"], 1.0, rel_tol=1e-6)
     assert node.last_seen == pytest.approx(101.0)
-    assert node.attributes["first_seen"] == pytest.approx(100.0)
+    assert node.created_at == pytest.approx(100.0)
 
 
 def test_repeated_observations_update_a_single_node():
@@ -204,7 +222,7 @@ def test_repeated_observations_update_a_single_node():
         )
 
     assert len(_object_nodes(manager)) == 1
-    assert _object_nodes(manager)[0].attributes["detection_observation_count"] == 6
+    assert object_group(_object_nodes(manager)[0].attributes, "observations")["detection_observation_count"] == 6
 
 
 # ========== best semantic match is selected ==========
@@ -234,7 +252,7 @@ def test_best_semantic_match_is_selected():
 
     assert stats["updated_object_ids"] == [chair_id]
     node = manager.sg.query.get_node(table_id)
-    assert node.attributes["detection_observation_count"] == 1
+    assert object_group(node.attributes, "observations")["detection_observation_count"] == 1
 
 
 def test_equal_similarity_breaks_on_distance():
@@ -309,7 +327,7 @@ def test_candidate_without_a_usable_embedding_still_blocks_creation():
 
     _apply(manager, _make_proposal_array(_make_proposal(1.0, 1.0)))
     node = _object_nodes(manager)[0]
-    node.attributes["object_embedding"] = None
+    object_group(node.attributes, "embeddings", create=True)["object_embedding"] = None
     sg.update.update_node(node.id, node)
 
     stats = _apply(
@@ -424,11 +442,11 @@ def test_object_embedding_is_the_normalized_running_mean_of_the_sum():
 
     node = _object_nodes(manager)[0]
     expected_sum = np.array([1.0, 0.0, 0.0]) + np.array([0.0, 1.0, 0.0])
-    assert node.attributes["embedding_sum"] == pytest.approx(expected_sum, abs=1e-6)
-    assert node.attributes["object_embedding"] == pytest.approx(
+    assert object_group(node.attributes, "embeddings")["sum"] == pytest.approx(expected_sum, abs=1e-6)
+    assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx(
         expected_sum / np.linalg.norm(expected_sum), abs=1e-6
     )
-    assert node.attributes["embedding_observation_count"] == 2
+    assert object_group(node.attributes, "observations")["embedding_observation_count"] == 2
 
     _apply(
         manager,
@@ -438,11 +456,11 @@ def test_object_embedding_is_the_normalized_running_mean_of_the_sum():
     )
     node = _object_nodes(manager)[0]
     expected_sum = expected_sum + np.array([0.0, 0.0, 1.0])
-    assert node.attributes["embedding_sum"] == pytest.approx(expected_sum, abs=1e-6)
-    assert node.attributes["object_embedding"] == pytest.approx(
+    assert object_group(node.attributes, "embeddings")["sum"] == pytest.approx(expected_sum, abs=1e-6)
+    assert object_group(node.attributes, "embeddings")["object_embedding"] == pytest.approx(
         expected_sum / np.linalg.norm(expected_sum), abs=1e-6
     )
-    assert node.attributes["embedding_observation_count"] == 3
+    assert object_group(node.attributes, "observations")["embedding_observation_count"] == 3
 
 
 def test_stored_object_embedding_is_unit_norm():
@@ -453,11 +471,11 @@ def test_stored_object_embedding_is_unit_norm():
         _make_proposal_array(_make_proposal(1.05, 1.0, embedding=(0.0, 3.0, 0.0)), stamp_sec=101),
     )
 
-    stored = _object_nodes(manager)[0].attributes["object_embedding"]
+    stored = object_group(_object_nodes(manager)[0].attributes, "embeddings")["object_embedding"]
     assert math.isclose(float(np.linalg.norm(stored)), 1.0, rel_tol=1e-6)
 
 
-def test_class_evidence_accumulates_and_decides_the_canonical_class():
+def test_object_semantic_state_retains_only_the_current_class_name():
     manager = _make_manager(semantic_similarity_threshold=-1.0)
 
     for index in range(4):
@@ -468,7 +486,7 @@ def test_class_evidence_accumulates_and_decides_the_canonical_class():
                 stamp_sec=100 + index,
             ),
         )
-    # A single dissenting observation must not flip the canonical class.
+    # The current proposal supplies the only persisted semantic field.
     _apply(
         manager,
         _make_proposal_array(
@@ -477,10 +495,8 @@ def test_class_evidence_accumulates_and_decides_the_canonical_class():
     )
 
     node = _object_nodes(manager)[0]
-    assert node.attributes["class_name"] == "chair"
-    assert node.attributes["class_evidence"]["chair"] == pytest.approx(3.6)
-    assert node.attributes["class_evidence"]["sofa"] == pytest.approx(0.5)
-    assert node.attributes["class_confidence"] == pytest.approx(3.6 / 4.1)
+    semantic = object_group(node.attributes, "semantic")
+    assert semantic == {"class_name": "sofa"}
 
 
 def test_detection_and_embedding_counters_are_separate():
@@ -496,9 +512,9 @@ def test_detection_and_embedding_counters_are_separate():
     )
 
     node = _object_nodes(manager)[0]
-    assert node.attributes["detection_observation_count"] == 2
-    assert node.attributes["embedding_observation_count"] == 2
-    assert node.attributes["object_embedding"] is None
+    assert object_group(node.attributes, "observations")["detection_observation_count"] == 2
+    assert object_group(node.attributes, "observations")["embedding_observation_count"] == 2
+    assert object_group(node.attributes, "embeddings")["object_embedding"] is None
 
 
 def test_position_update_policies():

@@ -31,9 +31,7 @@ import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
 from scene_graph_core.algorithms.semantic import (
-    accumulate_class_evidence,
     accumulate_embedding,
-    canonical_class_from_evidence,
     cosine_similarity,
     normalize_embedding,
 )
@@ -45,6 +43,7 @@ from scene_graph_core.representation import (
     NodeType,
     ObjectNode,
 )
+from scene_graph_core.representation.object_schema import object_group
 from scene_graph_core.services import GraphPatch
 from semantic_perception_msgs.msg import ObjectProposal3DArray
 
@@ -482,7 +481,7 @@ class ObjectNodeManager:
             if match is not None:
                 node = self._update_object_node(
                     match, proposal, position, fused_embedding, class_name,
-                    confidence, timestamp, similarity,
+                    timestamp, similarity,
                 )
                 outcome = "updated"
             elif candidates:
@@ -500,7 +499,7 @@ class ObjectNodeManager:
             else:
                 node = self._create_object_node(
                     proposal, position, fused_embedding, class_name,
-                    confidence, timestamp,
+                    timestamp,
                 )
                 outcome = "created"
         except Exception as exc:
@@ -598,7 +597,7 @@ class ObjectNodeManager:
         observed_best: Optional[float] = None
 
         for node, distance in candidates:
-            stored = (node.attributes or {}).get("object_embedding")
+            stored = object_group(node.attributes, "embeddings").get("object_embedding")
             similarity = cosine_similarity(fused_embedding, stored)
             if similarity is None:
                 continue
@@ -622,7 +621,6 @@ class ObjectNodeManager:
         position: Tuple[float, float, float],
         fused_embedding: np.ndarray,
         class_name: str,
-        confidence: float,
         timestamp: float,
     ) -> BaseNode:
         """Insert a new OBJECT node seeded from one proposal."""
@@ -637,20 +635,20 @@ class ObjectNodeManager:
         embedding_sum, embedding_count, mean = accumulate_embedding(
             None, 0, fused_embedding
         )
-        evidence = accumulate_class_evidence(None, class_name, confidence)
-        canonical_name, canonical_confidence = canonical_class_from_evidence(evidence)
-
         node.attributes = {
-            "class_name": canonical_name or class_name,
-            "class_confidence": canonical_confidence,
-            "class_evidence": evidence,
-            "detection_observation_count": 1,
-            "embedding_observation_count": int(embedding_count),
-            "embedding_sum": _as_list(embedding_sum),
-            "object_embedding": _as_list(mean),
-            "first_seen": timestamp,
+            "semantic": {"class_name": class_name},
+            "observations": {
+                "detection_observation_count": 1,
+                "embedding_observation_count": int(embedding_count),
+            },
+            "embeddings": {
+                "sum": _as_list(embedding_sum),
+                "object_embedding": _as_list(mean),
+            },
         }
-        node.attributes.update(self._canonical_components(proposal))
+        for group, values in self._canonical_components(proposal).items():
+            if values:
+                node.attributes.setdefault(group, {}).update(values)
         node.id = self.sg.update.add_node(node)
         return node
 
@@ -661,7 +659,6 @@ class ObjectNodeManager:
         position: Tuple[float, float, float],
         fused_embedding: np.ndarray,
         class_name: str,
-        confidence: float,
         timestamp: float,
         similarity: Optional[float],
     ) -> BaseNode:
@@ -669,61 +666,61 @@ class ObjectNodeManager:
         attributes = node.attributes if isinstance(node.attributes, dict) else {}
         node.attributes = attributes
 
+        semantic = object_group(attributes, "semantic", create=True)
+        observations = object_group(attributes, "observations", create=True)
+        embeddings = object_group(attributes, "embeddings", create=True)
         detection_count = self._nonnegative_int(
-            attributes.get("detection_observation_count"), default=0
+            observations.get("detection_observation_count"), default=0
         )
         embedding_count = self._nonnegative_int(
-            attributes.get("embedding_observation_count"), default=0
+            observations.get("embedding_observation_count"), default=0
         )
         embedding_sum, embedding_count, mean = accumulate_embedding(
-            attributes.get("embedding_sum"), embedding_count, fused_embedding
+            embeddings.get("sum"), embedding_count, fused_embedding
         )
 
-        evidence = accumulate_class_evidence(
-            attributes.get("class_evidence"), class_name, confidence
-        )
-        canonical_name, canonical_confidence = canonical_class_from_evidence(evidence)
-
-        attributes["detection_observation_count"] = detection_count + 1
-        attributes["embedding_observation_count"] = int(embedding_count)
-        attributes["embedding_sum"] = _as_list(embedding_sum)
-        attributes["object_embedding"] = _as_list(mean)
-        attributes["class_evidence"] = evidence
-        attributes["class_name"] = canonical_name or class_name
-        attributes["class_confidence"] = canonical_confidence
-        attributes.setdefault("first_seen", node.created_at)
+        observations["detection_observation_count"] = detection_count + 1
+        observations["embedding_observation_count"] = int(embedding_count)
+        embeddings["sum"] = _as_list(embedding_sum)
+        embeddings["object_embedding"] = _as_list(mean)
+        semantic["class_name"] = class_name
         if similarity is not None:
-            attributes["last_semantic_similarity"] = float(similarity)
+            observations["last_semantic_similarity"] = float(similarity)
 
-        # The canonical CLIP components come from an observation of the canonical
-        # class, so they never describe a class the node was not resolved to.
-        if class_name == attributes["class_name"]:
-            attributes.update(self._canonical_components(proposal))
+        for group, values in self._canonical_components(proposal).items():
+            if values:
+                object_group(attributes, group, create=True).update(values)
 
         self._update_spatial_representation(node, position, detection_count)
         node.last_seen = timestamp
         return node
 
-    def _canonical_components(self, proposal) -> Dict[str, object]:
+    def _canonical_components(self, proposal) -> Dict[str, Dict[str, object]]:
         """Return the per-observation CLIP components kept on the node."""
-        components: Dict[str, object] = {}
+        components: Dict[str, Dict[str, object]] = {
+            "embeddings": {},
+            "detection": {},
+            "geometry": {},
+        }
         for name in ("mask_embedding", "bbox_embedding", "label_embedding", "fused_embedding"):
             vector = normalize_embedding(getattr(proposal, name, None))
-            components[name] = _as_list(vector)
-        components["detection_confidence"] = self._finite_scalar(
+            components["embeddings"][name] = _as_list(vector)
+        components["detection"]["detection_confidence"] = self._finite_scalar(
             getattr(proposal, "detection_confidence", None)
         )
-        components["detector_source"] = str(
+        components["detection"]["detector_source"] = str(
             getattr(proposal, "detector_source", "") or ""
         )
-        components["semantic_perception_class_id"] = self._nonnegative_int(
+        components["detection"]["semantic_perception_class_id"] = self._nonnegative_int(
             getattr(proposal, "class_id", 0), default=0
         )
         size = getattr(getattr(proposal, "bbox_3d", None), "size", None)
         if size is not None and all(
             self._is_finite(getattr(size, axis, None)) for axis in ("x", "y", "z")
         ):
-            components["bbox_3d_size"] = [float(size.x), float(size.y), float(size.z)]
+            components["geometry"]["bbox_3d_size"] = [
+                float(size.x), float(size.y), float(size.z)
+            ]
         return components
 
     def _update_spatial_representation(

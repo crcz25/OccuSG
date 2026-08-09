@@ -74,7 +74,7 @@ semantic_perception:
     # Fallback compute device for any model whose own *_device override is not set.
     device: "cuda"
     # Device pool; worker i loads its models on devices[i % len(devices)].
-    devices: ["cuda:0", "cuda:1"]
+    devices: ["cuda:0"]
     # Number of inference workers, each owning a full copy of the models on its device.
     # 0 = one worker per configured device (recommended). Values above the device count
     # make workers share GPUs and multiply GPU memory usage for little extra throughput.
@@ -102,7 +102,7 @@ semantic_perception:
     # to the free amount minus 1 GiB headroom, with a warning — otherwise this node could
     # starve the display server and freeze the machine. Only enforceable on CUDA devices;
     # other backends log a warning and continue without a hard limit.
-    gpu_memory_budget_gb: 18.0
+    gpu_memory_budget_gb: 8.0
     # Log input/processing rates, queue depth, per-stage latency, drop counts, and GPU
     # memory usage every N seconds (0 disables). Also warns whenever the input rate
     # exceeds processing capacity.

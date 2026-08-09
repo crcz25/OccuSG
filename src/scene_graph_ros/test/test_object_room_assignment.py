@@ -72,7 +72,7 @@ def _add_object(sg, x, y):
     node.pose.position.x = float(x)
     node.pose.position.y = float(y)
     node.pose.orientation.w = 1.0
-    node.attributes = {"class_name": "chair"}
+    node.attributes = {"semantic": {"class_name": "chair"}}
     node.id = sg.update.add_node(node)
     return int(node.id)
 

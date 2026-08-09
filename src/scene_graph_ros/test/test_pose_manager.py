@@ -42,7 +42,7 @@ def _make_object_node(
     node.pose.orientation.w = 1.0
     node.attributes = {}
     if class_name is not None:
-        node.attributes["class_name"] = str(class_name)
+        node.attributes["semantic"] = {"class_name": str(class_name)}
     return node
 
 

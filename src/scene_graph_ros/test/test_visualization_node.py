@@ -45,7 +45,7 @@ def _make_object_node(x: float, y: float) -> ObjectNode:
     node.pose.position.x = float(x)
     node.pose.position.y = float(y)
     node.pose.orientation.w = 1.0
-    node.attributes = {"class_name": "chair"}
+    node.attributes = {"semantic": {"class_name": "chair"}}
     return node
 
 

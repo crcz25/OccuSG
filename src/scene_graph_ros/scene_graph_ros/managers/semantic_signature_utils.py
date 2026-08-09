@@ -7,18 +7,18 @@ from typing import Dict, Hashable, Iterable, Mapping, Optional, Set, TypeVar
 
 from scene_graph_core.graph_interface import SceneGraphInterface
 from scene_graph_core.representation import BaseNode, NodeType
+from scene_graph_core.representation.object_schema import object_group
 
 SemanticToken = TypeVar("SemanticToken", bound=Hashable)
 SemanticObjectTuple = tuple[str, float, float]
 
 
 def get_object_class_name(object_node: Optional[BaseNode]) -> Optional[str]:
-    """Return the canonical OBJECT class label from ``attributes['class_name']``."""
+    """Return the canonical OBJECT class label from the semantic group."""
     if object_node is None or object_node.node_type != NodeType.OBJECT:
         return None
 
-    attrs = object_node.attributes or {}
-    class_name = attrs.get("class_name")
+    class_name = object_group(object_node.attributes, "semantic").get("class_name")
     if class_name is None:
         return None
 

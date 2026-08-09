@@ -26,6 +26,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from scene_graph_core.graph_interface import SceneGraphInterface
 from scene_graph_core.representation import EdgeType, NodeType, get_type_scoped_id
+from scene_graph_core.representation.object_schema import object_group
 
 
 IDENTITY_POSE = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
@@ -632,7 +633,9 @@ class VisualizationNode(Node):
                 marker_id = self._type_scoped_id(obj_node, NodeType.OBJECT)
                 class_name = "unknown"
                 if getattr(obj_node, "attributes", None):
-                    class_name = obj_node.attributes.get("class_name", "unknown")
+                    class_name = object_group(
+                        obj_node.attributes, "semantic"
+                    ).get("class_name", "unknown")
                 spec = self._build_text_spec(
                     namespace=OBJECT_LABEL_NS,
                     marker_id=marker_id,
